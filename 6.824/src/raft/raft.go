@@ -386,18 +386,20 @@ func (rf *Raft) HandleAppendEntries (appendWrapper *AppendEntriesWrapper) Status
         }
         oldCommitIndex := rf.commitIndex
         if args.LeaderCommit > rf.commitIndex {
-            rf.commitIndex = args.LeaderCommit
-        } else {
-            rf.commitIndex = rf.LastLogIndex()
-        }
+            if args.LeaderCommit < rf.LastLogIndex() {
+                rf.commitIndex = args.LeaderCommit
+            } else {
+                rf.commitIndex = rf.LastLogIndex()
+            }
 
-        for i := oldCommitIndex+1; i <= rf.commitIndex; i++ {
-            msg := ApplyMsg{CommandValid: true,
-                            Command: rf.log[i-1].Command,
-                            CommandIndex: i}
-            rf.Log("apply msg: %d %v\n", msg.CommandIndex, msg.Command)
-            rf.applyCh <- msg
-            rf.lastApplied = rf.commitIndex
+            for i := oldCommitIndex+1; i <= rf.commitIndex; i++ {
+                msg := ApplyMsg{CommandValid: true,
+                                Command: rf.log[i-1].Command,
+                                CommandIndex: i}
+                rf.Log("apply msg: %d %v\n", msg.CommandIndex, msg.Command)
+                rf.applyCh <- msg
+                rf.lastApplied = rf.commitIndex
+            }
         }
 
         nextStatus = Follower
