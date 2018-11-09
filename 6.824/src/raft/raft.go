@@ -69,9 +69,9 @@ const (
 func StatusName (s Status) string {
     switch s {
     case Candidate: return "cand"
-    case Leader: return "lead"
-    case Follower: return "foll"
-    default: return "unknown"
+    case Leader:    return "lead"
+    case Follower:  return "foll"
+    default:        return "unknown"
     }
 }
 
@@ -107,6 +107,11 @@ type HeartBeatReply struct {
 type CommandReply struct {
     Term        int
     Index       int
+}
+
+type State struct {
+    Term        int
+    IsLeader    bool
 }
 
 //
@@ -151,6 +156,8 @@ type Raft struct {
 
         cmdQueue        chan interface{}
         cmdReplyQueue   chan CommandReply
+
+        stateCh         chan chan State
 }
 
 func (rf *Raft) Log (format string, a ...interface{}) {
@@ -169,17 +176,13 @@ func (rf *Raft) LastLogIndex () int {
 // believes it is the leader.
 func (rf *Raft) GetState () (int, bool) {
 
-    var term int
-    var isleader bool
     // Your code here (2A).
-    term = rf.currentTerm
-    if rf.status == Leader {
-        isleader = true
-    } else {
-        isleader = false
+    c := make(chan State)
+    select {
+    case rf.stateCh <- c:
+        state := <-c
+        return state.Term, state.IsLeader
     }
-
-    return term, isleader
 }
 
 
@@ -560,6 +563,10 @@ func (rf *Raft) ActAsFollower () Status {
     for {
         select {
 
+        case c := <-rf.stateCh:
+            c <- State{Term: rf.currentTerm,
+                       IsLeader: false}
+
         case appendWrapper := <-rf.appendQueue:
             nextStatus = rf.HandleAppendEntries(appendWrapper)
             if nextStatus != Follower {
@@ -628,6 +635,10 @@ func (rf *Raft) ActAsCandidate () Status {
     nextStatus := rf.status
     for {
         select {
+
+        case c := <-rf.stateCh:
+            c <- State{Term: rf.currentTerm,
+                       IsLeader: false}
 
         case appendWrapper := <-rf.appendQueue:
             nextStatus = rf.HandleAppendEntries(appendWrapper)
@@ -822,6 +833,10 @@ func (rf *Raft) ActAsLeader () Status {
     for {
         select {
 
+        case c := <-rf.stateCh:
+            c <- State{Term: rf.currentTerm,
+                       IsLeader: true}
+
         case hbReply := <-rf.hbQueue:
             if hbReply.Success == true {
                 rf.nextIndex[hbReply.Server] = Min(hbReply.PrevIndex+2,
@@ -894,6 +909,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
         rf.hbQueue = make(chan HeartBeatReply, len(rf.peers))
         rf.cmdQueue = make(chan interface{}, len(rf.peers))
         rf.cmdReplyQueue = make(chan CommandReply, len(peers))
+        rf.stateCh = make(chan chan State)
         rf.nextIndex = make([]int, len(peers))
         rf.matchIndex = make([]int, len(peers))
 
