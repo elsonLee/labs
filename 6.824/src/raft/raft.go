@@ -155,10 +155,12 @@ type Raft struct {
         nextIndex       []int
         matchIndex      []int
 
-        // queue for request
-        voteQueue       chan RequestVoteWrapper
-        appendQueue     chan *AppendEntriesWrapper
-        hbQueue         chan HeartBeatReply
+        // channels
+        voteCh          chan RequestVoteWrapper
+
+        appendCh        chan AppendEntriesWrapper
+
+        heartbeatCh     chan HeartBeatReply
 
         commandCh       chan CommandRequest
 
@@ -365,7 +367,7 @@ func (rf *Raft) RequestVote (args *RequestVoteArgs, reply *RequestVoteReply) {
                                       reply: reply}
     voteWrapper.done = make(chan bool)
 
-    rf.voteQueue <- voteWrapper
+    rf.voteCh <- voteWrapper
     <-voteWrapper.done
 }
 
@@ -375,7 +377,7 @@ type AppendEntriesWrapper struct {
     done        chan bool
 }
 
-func (rf *Raft) HandleAppendEntries (appendWrapper *AppendEntriesWrapper) Status {
+func (rf *Raft) HandleAppendEntries (appendWrapper AppendEntriesWrapper) Status {
 
     nextStatus := rf.status
     args := appendWrapper.args
@@ -459,11 +461,11 @@ func (rf *Raft) HandleAppendEntries (appendWrapper *AppendEntriesWrapper) Status
 
 func (rf *Raft) AppendEntries (args *AppendEntriesArgs, reply *AppendEntriesReply) {
 
-    appendWrapper := &AppendEntriesWrapper{args: args,
-                                           reply: reply}
+    appendWrapper := AppendEntriesWrapper{args: args,
+                                          reply: reply}
     appendWrapper.done = make(chan bool)
 
-    rf.appendQueue <- appendWrapper
+    rf.appendCh <- appendWrapper
     <-appendWrapper.done
 }
 
@@ -571,13 +573,13 @@ func (rf *Raft) ActAsFollower () Status {
                                                    Index: -1,
                                                    IsLeader: false}
 
-        case appendWrapper := <-rf.appendQueue:
+        case appendWrapper := <-rf.appendCh:
             nextStatus = rf.HandleAppendEntries(appendWrapper)
             if nextStatus != Follower {
                 return nextStatus
             }
 
-        case voteWrapper := <-rf.voteQueue:
+        case voteWrapper := <-rf.voteCh:
             nextStatus = rf.HandleRequestVoteWrapper(voteWrapper)
             if nextStatus != Follower {
                 return nextStatus
@@ -649,13 +651,13 @@ func (rf *Raft) ActAsCandidate () Status {
                                                    Index: -1,
                                                    IsLeader: false}
 
-        case appendWrapper := <-rf.appendQueue:
+        case appendWrapper := <-rf.appendCh:
             nextStatus = rf.HandleAppendEntries(appendWrapper)
             if nextStatus != Candidate {
                 return nextStatus
             }
 
-        case voteWrapper := <-rf.voteQueue:
+        case voteWrapper := <-rf.voteCh:
             nextStatus = rf.HandleRequestVoteWrapper(voteWrapper)
             if nextStatus != Candidate {
                 return nextStatus
@@ -714,10 +716,10 @@ func (rf *Raft) RequestHeartBeat (server int, appendRequest *AppendEntriesArgs) 
     appendReply := &AppendEntriesReply{}
     if rf.sendAppendEntries(server, appendRequest, appendReply) == true {
         //rf.Log("recv hb from %d, %v\n", server, appendReply.Success)
-        rf.hbQueue <- HeartBeatReply{Server: server,
-                                     PrevIndex: appendRequest.PrevLogIndex,
-                                     NextTryIndex: appendReply.NextTryIndex,
-                                     Success: appendReply.Success}
+        rf.heartbeatCh <- HeartBeatReply{Server: server,
+                                         PrevIndex: appendRequest.PrevLogIndex,
+                                         NextTryIndex: appendReply.NextTryIndex,
+                                         Success: appendReply.Success}
         if appendReply.Success == false {
             rf.Log("hb failed from %d, previdx: %d, nextry: %d\n",
                     server, appendRequest.PrevLogIndex, appendReply.NextTryIndex)
@@ -848,7 +850,7 @@ func (rf *Raft) ActAsLeader () Status {
             c <- State{Term: rf.currentTerm,
                        IsLeader: true}
 
-        case hbReply := <-rf.hbQueue:
+        case hbReply := <-rf.heartbeatCh:
             if hbReply.Success == true {
                 rf.nextIndex[hbReply.Server] = Min(hbReply.PrevIndex+2,
                                                    rf.LastLogIndex()+1)
@@ -864,13 +866,13 @@ func (rf *Raft) ActAsLeader () Status {
         case commandRequest := <-rf.commandCh:
             rf.AppendCommand(commandRequest)
 
-        case appendWrapper := <-rf.appendQueue:
+        case appendWrapper := <-rf.appendCh:
             nextStatus = rf.HandleAppendEntries(appendWrapper)
             if nextStatus != Leader {
                 return nextStatus
             }
 
-        case voteWrapper := <-rf.voteQueue:
+        case voteWrapper := <-rf.voteCh:
             nextStatus = rf.HandleRequestVoteWrapper(voteWrapper)
             if nextStatus != Leader {
                 return nextStatus
@@ -915,9 +917,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
         rf.lastApplied = 0
         rf.status = Follower
         rf.electionTimeout = generateElectionTimeout()
-        rf.voteQueue = make(chan RequestVoteWrapper)
-        rf.appendQueue = make(chan *AppendEntriesWrapper, len(rf.peers))
-        rf.hbQueue = make(chan HeartBeatReply, len(rf.peers))
+        rf.voteCh = make(chan RequestVoteWrapper)
+        rf.appendCh = make(chan AppendEntriesWrapper)
+        rf.heartbeatCh = make(chan HeartBeatReply)
         rf.commandCh = make(chan CommandRequest)
         rf.stateCh = make(chan chan State)
         rf.nextIndex = make([]int, len(peers))
