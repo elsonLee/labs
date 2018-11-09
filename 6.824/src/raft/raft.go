@@ -567,7 +567,7 @@ func (rf *Raft) Start (command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
     // Your code here, if desired.
-    rf.debugOn.Set(false)
+    //rf.debugOn.Set(false)
 
     //! reset origTime
     origTime = time.Now()
@@ -750,22 +750,26 @@ func (rf *Raft) RequestHeartBeat (server int, appendRequest *AppendEntriesArgs) 
 }
 
 
-func (rf *Raft) RequestCommands (server int, appendRequest *AppendEntriesArgs) *AppendEntriesReply {
+func (rf *Raft) RequestCommands (server int, appendRequest *AppendEntriesArgs) AppendEntriesReply {
 
-    appendReply := &AppendEntriesReply{}
+    appendReply := AppendEntriesReply{}
 
-    if rf.sendAppendEntries(server, appendRequest, appendReply) == true {
-        if appendReply.Success == true {
-            rf.nextIndex[server] = Min(appendRequest.PrevLogIndex+2,
-                                       rf.LastLogIndex()+1)
-        } else {
-            //rf.nextIndex[server] = Max(1, appendReqeust.PrevLogIndex)
-        }
+    if rf.sendAppendEntries(server, appendRequest, &appendReply) == true {
+        //if appendReply.Success == true {
+        //    rf.nextIndex[server] = Min(appendRequest.PrevLogIndex+2,
+        //                               rf.LastLogIndex()+1)
+        //} else {
+        //    //rf.nextIndex[server] = Max(1, appendReqeust.PrevLogIndex)
+        //}
     }
 
     return appendReply
 }
 
+type AppendEntriesReplyWrapper struct {
+    Server      int
+    Reply       AppendEntriesReply
+}
 
 func (rf *Raft) AppendCommand (commandRequest CommandRequest) {
 
@@ -779,17 +783,13 @@ func (rf *Raft) AppendCommand (commandRequest CommandRequest) {
                                            IsLeader: true}
 
     request := rf.PrepareAppendEntries(rf.LastLogIndex(), 1)
-    cntCh := make(chan int, 1)
+    replyCh := make(chan AppendEntriesReplyWrapper)
     for server := 0; server < len(rf.peers); server++ {
         if server != rf.me {
-            go func (server_ int, cntCh_ chan int) {
-                reply := rf.RequestCommands(server_, request)
-                if reply.Success {
-                    cntCh_ <- 1
-                } else {
-                    cntCh_ <- 0
-                }
-            }(server, cntCh)
+            go func (server_ int) {
+                replyCh <- AppendEntriesReplyWrapper{Server: server_,
+                                                     Reply: rf.RequestCommands(server_, request)}
+            }(server)
         }
     }
 
@@ -798,9 +798,13 @@ func (rf *Raft) AppendCommand (commandRequest CommandRequest) {
     commitCnt := 1
     for {
         select {
-        case cnt := <-cntCh:
+        case reply := <-replyCh:
             recvCnt += 1
-            commitCnt += cnt
+            if reply.Reply.Success {
+                commitCnt += 1
+                rf.nextIndex[reply.Server] = Min(request.PrevLogIndex+2,
+                                                 rf.LastLogIndex()+1)
+            }
             if commitCnt > len(rf.peers)/2 {
                 oldCommitIndex := rf.commitIndex
                 rf.commitIndex = rf.LastLogIndex()
@@ -818,6 +822,7 @@ func (rf *Raft) AppendCommand (commandRequest CommandRequest) {
             if recvCnt == len(rf.peers)-1 {
                 return
             }
+
         case <- ticker.C:
             //rf.Log("append entry timeout, commitCnt: %d\n", commitCnt)
             return
