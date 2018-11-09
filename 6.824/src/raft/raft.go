@@ -23,8 +23,8 @@ import "time"
 import "sync"
 import "labrpc"
 
-// import "bytes"
-// import "labgob"
+import "bytes"
+import "labgob"
 
 var origTime time.Time = time.Now()
 func timeStampInMs () int64 {
@@ -188,6 +188,13 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+        w := new(bytes.Buffer)
+        e := labgob.NewEncoder(w)
+        e.Encode(rf.currentTerm)
+        e.Encode(rf.votedFor)
+        e.Encode(rf.log)
+        data := w.Bytes()
+        rf.persister.SaveRaftState(data)
 }
 
 
@@ -211,6 +218,20 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+        r := bytes.NewBuffer(data)
+        d := labgob.NewDecoder(r)
+        var currentTerm int
+        var votedFor int
+        var log []LogEntry
+        if d.Decode(&currentTerm) != nil ||
+           d.Decode(&votedFor) != nil ||
+           d.Decode(&log) != nil {
+            panic("read presist error!")
+        } else {
+            rf.currentTerm = currentTerm
+            rf.votedFor = votedFor
+            rf.log = log
+        }
 }
 
 
@@ -300,9 +321,6 @@ func (rf *Raft) HandleRequestVoteWrapper(voteWrapper *RequestVoteWrapper) Status
         }
     }
 
-    voteWrapper.done <- true
-    //fmt.Printf("[%d:%d] <- [%d:%d] vote succ\n", rf.me, rf.currentTerm, voteWrapper.args.CandidateId, voteWrapper.args.Term)
-
     if args.Term > rf.currentTerm {
         rf.currentTerm = args.Term
         if reply.VoteGranted {
@@ -312,6 +330,11 @@ func (rf *Raft) HandleRequestVoteWrapper(voteWrapper *RequestVoteWrapper) Status
         }
         nextStatus = Follower
     }
+
+    rf.persist()
+
+    voteWrapper.done <- true
+    //fmt.Printf("[%d:%d] <- [%d:%d] vote succ\n", rf.me, rf.currentTerm, voteWrapper.args.CandidateId, voteWrapper.args.Term)
 
     return nextStatus
 }
@@ -415,7 +438,10 @@ func (rf *Raft) HandleAppendEntries (appendWrapper *AppendEntriesWrapper) Status
         }
     }
 
+    rf.persist()
+
     appendWrapper.done <- true
+
     return nextStatus
 }
 
