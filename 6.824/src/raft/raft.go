@@ -156,7 +156,7 @@ type Raft struct {
         matchIndex      []int
 
         // queue for request
-        voteQueue       chan *RequestVoteWrapper
+        voteQueue       chan RequestVoteWrapper
         appendQueue     chan *AppendEntriesWrapper
         hbQueue         chan HeartBeatReply
 
@@ -319,7 +319,7 @@ type RequestVoteWrapper struct {
     done        chan bool
 }
 
-func (rf *Raft) HandleRequestVoteWrapper (voteWrapper *RequestVoteWrapper) Status {
+func (rf *Raft) HandleRequestVoteWrapper (voteWrapper RequestVoteWrapper) Status {
 
     nextStatus := rf.status
     args := voteWrapper.args
@@ -361,8 +361,8 @@ func (rf *Raft) HandleRequestVoteWrapper (voteWrapper *RequestVoteWrapper) Statu
 //
 func (rf *Raft) RequestVote (args *RequestVoteArgs, reply *RequestVoteReply) {
     // Your code here (2A, 2B).
-    voteWrapper := &RequestVoteWrapper{args: args,
-                                       reply: reply}
+    voteWrapper := RequestVoteWrapper{args: args,
+                                      reply: reply}
     voteWrapper.done = make(chan bool)
 
     rf.voteQueue <- voteWrapper
@@ -915,7 +915,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
         rf.lastApplied = 0
         rf.status = Follower
         rf.electionTimeout = generateElectionTimeout()
-        rf.voteQueue = make(chan *RequestVoteWrapper, len(rf.peers))
+        rf.voteQueue = make(chan RequestVoteWrapper)
         rf.appendQueue = make(chan *AppendEntriesWrapper, len(rf.peers))
         rf.hbQueue = make(chan HeartBeatReply, len(rf.peers))
         rf.commandCh = make(chan CommandRequest)
