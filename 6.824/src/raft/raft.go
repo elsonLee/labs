@@ -17,14 +17,17 @@ package raft
 //   in the same server.
 //
 
-import "fmt"
-import "math/rand"
-import "time"
-import "sync"
-import "labrpc"
+import (
+    "math/rand"
+    "sync/atomic"
+    "fmt"
+    "time"
+    "sync"
+    "bytes"
 
-import "bytes"
-import "labgob"
+    "labrpc"
+    "labgob"
+)
 
 var origTime time.Time = time.Now()
 func timeStampInMs () int64 {
@@ -72,6 +75,21 @@ func StatusName (s Status) string {
     case Leader:    return "lead"
     case Follower:  return "foll"
     default:        return "unknown"
+    }
+}
+
+type AtomicBool struct { val int32 }
+func (a *AtomicBool) Set (val bool) {
+    var ival int32 = 0
+    if val { ival = 1 }
+    atomic.StoreInt32(&a.val, ival)
+}
+
+func (a *AtomicBool) Get () bool {
+    if atomic.LoadInt32(&a.val) == 1 {
+        return true
+    } else {
+        return false
     }
 }
 
@@ -135,24 +153,29 @@ type Raft struct {
 
         applyCh         chan ApplyMsg
 
-        debugOn         bool
+        debugOn         AtomicBool
 
         status          Status
 
         electionTimeout  int
+
         heartbeatTimeout int
 
         // Persistent state on all servers
         currentTerm     int
+
         votedFor        int
+
         log             []LogEntry
 
         // Volatile state on all servers
         commitIndex     int
+
         lastApplied     int
 
         // Volatile state on leaders
         nextIndex       []int
+
         matchIndex      []int
 
         // channels
@@ -168,7 +191,7 @@ type Raft struct {
 }
 
 func (rf *Raft) Log (format string, a ...interface{}) {
-    if rf.debugOn {
+    if rf.debugOn.Get() {
         fmt.Printf("%d ms [%d:%d] %s",
             timeStampInMs(), rf.me, rf.currentTerm,
             fmt.Sprintf(format, a...))
@@ -545,7 +568,7 @@ func (rf *Raft) Start (command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
     // Your code here, if desired.
-    rf.debugOn = false
+    rf.debugOn.Set(false)
 
     //! reset origTime
     origTime = time.Now()
@@ -909,8 +932,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
         rf.applyCh = applyCh
-        //rf.debugOn = true
-        rf.debugOn = false
+        //rf.debugOn.Set(true)
+        rf.debugOn.Set(false)
         rf.currentTerm = 0
         rf.votedFor = -1
         rf.commitIndex = 0
