@@ -66,6 +66,15 @@ const (
     Invalid   Status = 3
 )
 
+func StatusName (s Status) string {
+    switch s {
+    case Candidate: return "cand"
+    case Leader: return "lead"
+    case Follower: return "foll"
+    default: return "unknown"
+    }
+}
+
 //
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -302,34 +311,34 @@ type RequestVoteWrapper struct {
     done        chan bool
 }
 
-func (rf *Raft) HandleRequestVoteWrapper(voteWrapper *RequestVoteWrapper) Status {
+func (rf *Raft) HandleRequestVoteWrapper (voteWrapper *RequestVoteWrapper) Status {
 
     nextStatus := rf.status
     args := voteWrapper.args
     reply := voteWrapper.reply
 
+    reply.Term = rf.currentTerm     // original currentTerm
+
     if args.Term < rf.currentTerm {
         reply.VoteGranted = false
     } else {
+
+        if args.Term > rf.currentTerm {
+            rf.currentTerm = args.Term
+            rf.votedFor = -1
+            nextStatus = Follower
+        }
+
         if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && rf.IsUptodate(args) {
             rf.votedFor = args.CandidateId
-            reply.Term = rf.currentTerm
-            nextStatus = Follower
             reply.VoteGranted = true
         } else {
             reply.VoteGranted = false
         }
     }
 
-    if args.Term > rf.currentTerm {
-        rf.currentTerm = args.Term
-        if reply.VoteGranted {
-            rf.votedFor = args.CandidateId
-        } else {
-            rf.votedFor = -1
-        }
-        nextStatus = Follower
-    }
+    rf.Log("[%s:%d:%v] vote to %d, %v\n",
+            StatusName(rf.status), rf.votedFor, rf.IsUptodate(args), args.CandidateId, reply.VoteGranted)
 
     rf.persist()
 
@@ -405,6 +414,7 @@ func (rf *Raft) HandleAppendEntries (appendWrapper *AppendEntriesWrapper) Status
 
     if reply.Success {
         if len(args.Entries) > 0 {
+            rf.Log("app %d, %v\n", args.LeaderId, args.Entries)
             rf.log = append(rf.log, args.Entries...)
         }
         oldCommitIndex := rf.commitIndex
@@ -541,12 +551,15 @@ func (rf *Raft) Kill() {
 
     //! reset origTime
     origTime = time.Now()
+
+    rf.Log("%v\n", rf.log)
 }
 
 
 func (rf *Raft) ActAsFollower () Status {
 
-    rf.Log("%d -> foll\n", rf.votedFor)
+    //rf.Log("%d -> foll, %d\n", rf.votedFor, rf.log)
+    rf.Log("-> foll vote: %d\n", rf.votedFor)
 
     ticker := time.NewTicker(time.Duration(kTick) * time.Millisecond)
     rf.electionTimeout = generateElectionTimeout()
@@ -608,6 +621,7 @@ func (rf *Raft) ActAsCandidate () Status {
     rf.currentTerm += 1
     rf.votedFor = rf.me
 
+    //rf.Log("-> cand, %v\n", rf.log)
     rf.Log("-> cand\n")
 
     voteReplyCh := make(chan *RequestVoteReply, len(rf.peers))
@@ -757,6 +771,7 @@ func (rf *Raft) AppendCommand (command interface{}) {
                                     Command: rf.log[i-1].Command,
                                     CommandIndex: i}
                     rf.Log("apply msg: %d %v\n", msg.CommandIndex, msg.Command)
+                    rf.persist()
                     rf.applyCh <- msg
                 }
                 rf.lastApplied = rf.commitIndex
@@ -766,7 +781,7 @@ func (rf *Raft) AppendCommand (command interface{}) {
                 return
             }
         case <- ticker.C:
-            rf.Log("append entry timeout, commitCnt: %d\n", commitCnt)
+            //rf.Log("append entry timeout, commitCnt: %d\n", commitCnt)
             return
         }
     }
@@ -874,7 +889,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
         rf.applyCh = applyCh
-        rf.debugOn = false
+        rf.debugOn = true
+        //rf.debugOn = false
         rf.currentTerm = 0
         rf.votedFor = -1
         rf.commitIndex = 0
