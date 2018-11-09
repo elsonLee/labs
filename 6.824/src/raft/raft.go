@@ -50,7 +50,7 @@ func Max (x, y int) int {
 var kTick int = 100
 var kHeartBeatTimeout int = 200
 var kminElectionTimeout int = 300
-var kmaxElectionTimeout int = 500
+var kmaxElectionTimeout int = 700
 
 func generateElectionTimeout() int {
     min := kminElectionTimeout
@@ -610,6 +610,7 @@ func (rf *Raft) ActAsCandidate () Status {
             }
 
         case voteReply := <-voteReplyCh:
+            //rf.Log("recv voteReply: %v\n", voteReply.VoteGranted)
             if voteReply.VoteGranted {
                 voteGrantCnt += 1
             }
@@ -660,6 +661,7 @@ func (rf *Raft) RequestHeartBeat (server int, appendRequest *AppendEntriesArgs) 
 
     appendReply := &AppendEntriesReply{}
     if rf.sendAppendEntries(server, appendRequest, appendReply) == true {
+        //rf.Log("recv hb from %d, %v\n", server, appendReply.Success)
         rf.hbQueue <- HeartBeatReply{Server: server,
                                      PrevIndex: appendRequest.PrevLogIndex,
                                      NextTryIndex: appendReply.NextTryIndex,
@@ -781,6 +783,8 @@ func (rf *Raft) ActAsLeader () Status {
     rf.heartbeatTimeout = kHeartBeatTimeout
     ticker := time.NewTicker(time.Duration(kTick) * time.Millisecond)
 
+    rf.SendHeartBeat()
+
     nextStatus := rf.status
     for {
         select {
@@ -844,7 +848,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
         rf.applyCh = applyCh
-        rf.debugOn = true
+        rf.debugOn = false
         rf.currentTerm = 0
         rf.votedFor = -1
         rf.commitIndex = 0
