@@ -104,9 +104,15 @@ type HeartBeatReply struct {
     Success         bool
 }
 
+type CommandRequest struct {
+    Command     interface{}
+    ReplyCh     chan CommandReply
+}
+
 type CommandReply struct {
     Term        int
     Index       int
+    IsLeader    bool
 }
 
 type State struct {
@@ -154,8 +160,7 @@ type Raft struct {
         appendQueue     chan *AppendEntriesWrapper
         hbQueue         chan HeartBeatReply
 
-        cmdQueue        chan interface{}
-        cmdReplyQueue   chan CommandReply
+        commandCh       chan CommandRequest
 
         stateCh         chan chan State
 }
@@ -492,8 +497,8 @@ func (rf *Raft) AppendEntries (args *AppendEntriesArgs, reply *AppendEntriesRepl
 // the struct itself.
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	return ok
+    ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+    return ok
 }
 
 
@@ -518,22 +523,16 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // the leader.
 //
 func (rf *Raft) Start (command interface{}) (int, int, bool) {
-    index := -1
-    term := -1
-    isLeader := true
 
     // Your code here (2B).
-    if rf.status != Leader {
-        isLeader = false
-    } else {
-        rf.Log("Start cmd: %v\n", command)
-        rf.cmdQueue <- command
-        cmdReply := <-rf.cmdReplyQueue
-        index = cmdReply.Index
-        term = cmdReply.Term
+    rf.Log("Start cmd: %v\n", command)
+    commandRequest := CommandRequest{Command: command,
+                                     ReplyCh: make(chan CommandReply)}
+    select {
+    case rf.commandCh <- commandRequest:
+        reply := <-commandRequest.ReplyCh
+        return reply.Index, reply.Term, reply.IsLeader
     }
-
-    return index, term, isLeader
 }
 
 //
@@ -566,6 +565,11 @@ func (rf *Raft) ActAsFollower () Status {
         case c := <-rf.stateCh:
             c <- State{Term: rf.currentTerm,
                        IsLeader: false}
+
+        case commandRequest := <-rf.commandCh:
+            commandRequest.ReplyCh <- CommandReply{Term: rf.currentTerm,
+                                                   Index: -1,
+                                                   IsLeader: false}
 
         case appendWrapper := <-rf.appendQueue:
             nextStatus = rf.HandleAppendEntries(appendWrapper)
@@ -639,6 +643,11 @@ func (rf *Raft) ActAsCandidate () Status {
         case c := <-rf.stateCh:
             c <- State{Term: rf.currentTerm,
                        IsLeader: false}
+
+        case commandRequest := <-rf.commandCh:
+            commandRequest.ReplyCh <- CommandReply{Term: rf.currentTerm,
+                                                   Index: -1,
+                                                   IsLeader: false}
 
         case appendWrapper := <-rf.appendQueue:
             nextStatus = rf.HandleAppendEntries(appendWrapper)
@@ -734,14 +743,16 @@ func (rf *Raft) RequestCommands (server int, appendRequest *AppendEntriesArgs) *
 }
 
 
-func (rf *Raft) AppendCommand (command interface{}) {
+func (rf *Raft) AppendCommand (commandRequest CommandRequest) {
 
+    command := commandRequest.Command
     newEntry := LogEntry{Term: rf.currentTerm,
                          Command: command}
 
     rf.log = append(rf.log, newEntry)
-    rf.cmdReplyQueue <- CommandReply{Term: rf.currentTerm,
-                                     Index: rf.LastLogIndex()}
+    commandRequest.ReplyCh <- CommandReply{Term: rf.currentTerm,
+                                           Index: rf.LastLogIndex(),
+                                           IsLeader: true}
 
     cntCh := make(chan int, 1)
     for server := 0; server < len(rf.peers); server++ {
@@ -850,8 +861,8 @@ func (rf *Raft) ActAsLeader () Status {
                 }
             }
 
-        case command := <-rf.cmdQueue:
-            rf.AppendCommand(command)
+        case commandRequest := <-rf.commandCh:
+            rf.AppendCommand(commandRequest)
 
         case appendWrapper := <-rf.appendQueue:
             nextStatus = rf.HandleAppendEntries(appendWrapper)
@@ -907,8 +918,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
         rf.voteQueue = make(chan *RequestVoteWrapper, len(rf.peers))
         rf.appendQueue = make(chan *AppendEntriesWrapper, len(rf.peers))
         rf.hbQueue = make(chan HeartBeatReply, len(rf.peers))
-        rf.cmdQueue = make(chan interface{}, len(rf.peers))
-        rf.cmdReplyQueue = make(chan CommandReply, len(peers))
+        rf.commandCh = make(chan CommandRequest)
         rf.stateCh = make(chan chan State)
         rf.nextIndex = make([]int, len(peers))
         rf.matchIndex = make([]int, len(peers))
