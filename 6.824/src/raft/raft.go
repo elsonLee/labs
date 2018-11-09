@@ -387,9 +387,8 @@ func (rf *Raft) HandleRequestVoteWrapper (voteWrapper RequestVoteWrapper) Status
 func (rf *Raft) RequestVote (args *RequestVoteArgs, reply *RequestVoteReply) {
     // Your code here (2A, 2B).
     voteWrapper := RequestVoteWrapper{args: args,
-                                      reply: reply}
-    voteWrapper.done = make(chan bool)
-
+                                      reply: reply,
+                                      done: make(chan bool)}
     rf.voteCh <- voteWrapper
     <-voteWrapper.done
 }
@@ -779,11 +778,11 @@ func (rf *Raft) AppendCommand (commandRequest CommandRequest) {
                                            Index: rf.LastLogIndex(),
                                            IsLeader: true}
 
+    request := rf.PrepareAppendEntries(rf.LastLogIndex(), 1)
     cntCh := make(chan int, 1)
     for server := 0; server < len(rf.peers); server++ {
         if server != rf.me {
             go func (server_ int, cntCh_ chan int) {
-                request := rf.PrepareAppendEntries(rf.LastLogIndex(), 1)
                 reply := rf.RequestCommands(server_, request)
                 if reply.Success {
                     cntCh_ <- 1
@@ -832,14 +831,14 @@ func (rf *Raft) SendHeartBeat () {
     var hbRequests []*AppendEntriesArgs
 
     for server := 0; server < len(rf.peers); server++ {
-        len := rf.LastLogIndex()-rf.nextIndex[server]+1
-        if len < 0 {
+        size := rf.LastLogIndex()-rf.nextIndex[server]+1
+        if size < 0 {
             rf.Log("lastLogIndex: %d, nextIndex[%d]: %d\n",
                     rf.LastLogIndex(), server, rf.nextIndex[server])
             panic(0)
         }
         hbRequests = append(hbRequests,
-                            rf.PrepareAppendEntries(rf.nextIndex[server], len))
+                            rf.PrepareAppendEntries(rf.nextIndex[server], size))
     }
 
     for server := 0; server < len(rf.peers); server++ {
