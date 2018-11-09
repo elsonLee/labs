@@ -379,6 +379,12 @@ func (rf *Raft) HandleAppendEntries (appendWrapper *AppendEntriesWrapper) Status
         reply.Success = false
     } else {
 
+        if args.Term > rf.currentTerm {
+            rf.currentTerm = args.Term
+            rf.votedFor = -1
+            nextStatus = Follower
+        }
+
         reply.Term = rf.currentTerm
 
         if args.PrevLogIndex <= 0 {
@@ -414,7 +420,7 @@ func (rf *Raft) HandleAppendEntries (appendWrapper *AppendEntriesWrapper) Status
 
     if reply.Success {
         if len(args.Entries) > 0 {
-            rf.Log("app %d, %v\n", args.LeaderId, args.Entries)
+            rf.Log("app from %d, %v\n", args.LeaderId, args.Entries)
             rf.log = append(rf.log, args.Entries...)
         }
         oldCommitIndex := rf.commitIndex
@@ -433,18 +439,6 @@ func (rf *Raft) HandleAppendEntries (appendWrapper *AppendEntriesWrapper) Status
                 rf.applyCh <- msg
                 rf.lastApplied = rf.commitIndex
             }
-        }
-
-        nextStatus = Follower
-    }
-
-    if args.Term > rf.currentTerm {
-        rf.currentTerm = args.Term
-        nextStatus = Follower
-        if reply.Success {
-            rf.votedFor = args.LeaderId
-        } else {
-            rf.votedFor = -1
         }
     }
 
