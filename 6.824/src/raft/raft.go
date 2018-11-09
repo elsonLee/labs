@@ -545,8 +545,6 @@ func (rf *Raft) Kill() {
 
     //! reset origTime
     origTime = time.Now()
-
-    rf.Log("%v\n", rf.log)
 }
 
 
@@ -883,8 +881,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
         rf.applyCh = applyCh
-        rf.debugOn = true
-        //rf.debugOn = false
+        //rf.debugOn = true
+        rf.debugOn = false
         rf.currentTerm = 0
         rf.votedFor = -1
         rf.commitIndex = 0
