@@ -61,6 +61,10 @@ func generateElectionTimeout() int {
     return rand.Intn(max-min) + min
 }
 
+const (
+    None      int = -1   //! for votedFor
+)
+
 type Status int
 const (
     Candidate Status = 0
@@ -356,13 +360,18 @@ func (rf *Raft) HandleRequestVoteWrapper (voteWrapper RequestVoteWrapper) Status
         reply.VoteGranted = false
     } else {
 
+        // update currentTerm to max value, for node that recovered from error or parition with 
+        // big term value, it won't be accepted to the system without this update
         if args.Term > rf.currentTerm {
             rf.currentTerm = args.Term
-            rf.votedFor = -1
+            // votedFor must be None, cuz the vote can be sent by candidate with non up-to-date log
+            rf.votedFor = None
             nextStatus = Follower
         }
 
-        if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && rf.IsUptodate(args) {
+        // IsUptodate ensures the leader has the latest log
+        // votedFor == None or CandidateId ensures node can only vote for one another node, for election safety
+        if (rf.votedFor == None || rf.votedFor == args.CandidateId) && rf.IsUptodate(args) {
             rf.votedFor = args.CandidateId
             reply.VoteGranted = true
         } else {
@@ -413,7 +422,7 @@ func (rf *Raft) HandleAppendEntries (appendWrapper AppendEntriesWrapper) Status 
 
         if args.Term > rf.currentTerm {
             rf.currentTerm = args.Term
-            rf.votedFor = -1
+            rf.votedFor = args.LeaderId     // AppendEntries must be sent by leader
             nextStatus = Follower
         }
 
@@ -939,7 +948,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
         //rf.debugOn.Set(true)
         rf.debugOn.Set(false)
         rf.currentTerm = 0
-        rf.votedFor = -1
+        rf.votedFor = None
         rf.commitIndex = 0
         rf.lastApplied = 0
         rf.status = Follower
@@ -969,7 +978,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
         }(rf)
 
 	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
+        rf.readPersist(persister.ReadRaftState())           // FIXME: not thread-safe
 
 	return rf
 }
