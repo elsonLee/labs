@@ -83,6 +83,15 @@ func StatusName (s Status) string {
     }
 }
 
+func AbbrStatusName (s Status) string {
+    switch s {
+    case Candidate: return "C"
+    case Leader:    return "L"
+    case Follower:  return "F"
+    default:        return "U"
+    }
+}
+
 type AtomicBool struct { val int32 }
 func (a *AtomicBool) Set (val bool) {
     var ival int32 = 0
@@ -199,8 +208,8 @@ type Raft struct {
 
 func (rf *Raft) Log (format string, a ...interface{}) {
     if rf.debugOn.Get() {
-        fmt.Printf("%d ms [%d:%d] %s",
-            timeStampInMs(), rf.me, rf.currentTerm,
+        fmt.Printf("%d ms [%s:%d:%d] %s",
+            timeStampInMs(), AbbrStatusName(rf.status), rf.me, rf.currentTerm,
             fmt.Sprintf(format, a...))
     }
 }
@@ -362,6 +371,10 @@ func (rf *Raft) HandleRequestVoteWrapper (voteWrapper RequestVoteWrapper) Status
     args := voteWrapper.args
     reply := voteWrapper.reply
 
+    if args.CandidateId == rf.me {
+        panic("args.CandidateId shouldn't be equal to rf.me!")
+    }
+
     reply.Term = rf.currentTerm     // original currentTerm
 
     if args.Term < rf.currentTerm {
@@ -374,6 +387,7 @@ func (rf *Raft) HandleRequestVoteWrapper (voteWrapper RequestVoteWrapper) Status
             rf.currentTerm = args.Term
             // votedFor must be None, cuz the vote can be sent by candidate with non up-to-date log
             rf.votedFor = None
+            rf.Log("-> foll vote: %d\n", rf.votedFor)
             nextStatus = Follower
         }
 
@@ -445,7 +459,7 @@ func (rf *Raft) HandleAppendEntries (appendWrapper AppendEntriesWrapper) Status 
     args := appendWrapper.args
     reply := appendWrapper.reply
 
-    reply.MatchIndex = 0
+    reply.MatchIndex = rf.commitIndex
     reply.NextIndexHint = 0
 
     if args.Term < rf.currentTerm {
@@ -455,7 +469,9 @@ func (rf *Raft) HandleAppendEntries (appendWrapper AppendEntriesWrapper) Status 
         if args.Term > rf.currentTerm {
             rf.currentTerm = args.Term
             rf.votedFor = args.LeaderId     // AppendEntries must be sent by leader
+            rf.Log("-> foll vote: %d\n", rf.votedFor)
             nextStatus = Follower
+            rf.Log("vote for %d\n", rf.votedFor)
         }
 
         //reply.Term = rf.currentTerm
@@ -488,7 +504,7 @@ func (rf *Raft) HandleAppendEntries (appendWrapper AppendEntriesWrapper) Status 
             }
         }
 
-        //! reset election timeout when succ
+        //! reset election timeout
         rf.electionTimeout = generateElectionTimeout()
     }
 
@@ -596,7 +612,7 @@ func (rf *Raft) Start (command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
     // Your code here, if desired.
-    //rf.debugOn.Set(false)
+    rf.debugOn.Set(false)
 
     //! reset origTime
     origTime = time.Now()
@@ -604,9 +620,6 @@ func (rf *Raft) Kill() {
 
 
 func (rf *Raft) ActAsFollower () Status {
-
-    //rf.Log("%d -> foll, %d\n", rf.votedFor, rf.log)
-    rf.Log("-> foll vote: %d\n", rf.votedFor)
 
     ticker := time.NewTicker(time.Duration(kTick) * time.Millisecond)
     rf.electionTimeout = generateElectionTimeout()
@@ -639,6 +652,7 @@ func (rf *Raft) ActAsFollower () Status {
         case <-ticker.C:
             rf.electionTimeout -= kTick
             if rf.electionTimeout <= 0 {
+                rf.Log("-> cand\n")
                 return Candidate
             }
         }
@@ -676,9 +690,6 @@ func (rf *Raft) ActAsCandidate () Status {
 
     rf.currentTerm += 1
     rf.votedFor = rf.me
-
-    //rf.Log("-> cand, %v\n", rf.log)
-    rf.Log("-> cand\n")
 
     voteReplyCh := make(chan *RequestVoteReply, len(rf.peers))
 
@@ -721,12 +732,14 @@ func (rf *Raft) ActAsCandidate () Status {
             }
 
             if voteGrantCnt > len(rf.peers)/2 {
+                rf.Log("-> lead\n")
                 return Leader
             }
 
         case <-ticker.C:
             rf.electionTimeout -= kTick
             if rf.electionTimeout <= 0 {
+                rf.Log("-> cand\n")
                 return Candidate
             }
         }
@@ -835,13 +848,14 @@ func (rf *Raft) SendAppend (server int) {
         return
     }
 
-    size := rf.LastLogIndex()-rf.nextIndex[server]+1
+    size := rf.LastLogIndex() - rf.nextIndex[server] + 1
     if size < 0 {
         rf.Log("lastLogIndex: %d, nextIndex[%d]: %d\n",
         rf.LastLogIndex(), server, rf.nextIndex[server])
         panic(0)
     }
     request := rf.PrepareAppendEntries(rf.nextIndex[server], size)
+    rf.Log("send AE to %d %v\n", server, *request)
     go func () {
         rf.RequestAppend(server, request)
     }()
@@ -856,8 +870,9 @@ func (rf *Raft) SendHeartbeat (server int) {
 
     nextIndex := Min(rf.matchIndex[server], rf.commitIndex) + 1
     request := rf.PrepareAppendEntries(nextIndex, 0)
+    rf.Log("send HB to %d %v\n", server, *request)
     go func () {
-        rf.RequestAppend(server, request)
+        rf.RequestHeartbeat(server, request)
     }()
 }
 
@@ -884,8 +899,6 @@ func (rf *Raft) BroadcastHeartbeat () {
 
 func (rf *Raft) ActAsLeader () Status {
 
-    rf.Log("-> lead\n")
-
     for i := 0; i < len(rf.peers); i++ {
         rf.matchIndex[i] = 0
         rf.nextIndex[i] = rf.LastLogIndex()+1
@@ -904,6 +917,12 @@ func (rf *Raft) ActAsLeader () Status {
             c <- State{Term: rf.currentTerm,
                        IsLeader: true}
 
+        case voteWrapper := <-rf.voteCh:
+            nextStatus = rf.HandleRequestVoteWrapper(voteWrapper)
+            if nextStatus != Leader {
+                return nextStatus
+            }
+
         case commandRequest := <-rf.commandCh:
             rf.AppendCommand(commandRequest)
 
@@ -915,16 +934,16 @@ func (rf *Raft) ActAsLeader () Status {
 
         case appendReplyWrapper := <-rf.appendReplyCh:
             server := appendReplyWrapper.Server
-            index := appendReplyWrapper.Index
+            //index := appendReplyWrapper.Index
             reply := appendReplyWrapper.Reply
-            rf.Log("from %d index: %d reply: %v\n", server, index, reply)
+            rf.Log("AEReply from %d match: %d reply: %v, log: %v\n", server, reply.MatchIndex, reply, rf.log)
             if reply.Success {
                 updated := false
                 if rf.matchIndex[server] < reply.MatchIndex {
                     updated = true
                     rf.matchIndex[server] = reply.MatchIndex
                 }
-                if rf.nextIndex[server] < reply.MatchIndex {
+                if rf.nextIndex[server] < reply.MatchIndex + 1 {
                     rf.nextIndex[server] = reply.MatchIndex + 1
                 }
                 if updated {
@@ -1017,8 +1036,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
         rf.applyCh = applyCh
-        rf.debugOn.Set(true)
-        //rf.debugOn.Set(false)
+        //rf.debugOn.Set(true)
+        rf.debugOn.Set(false)
         rf.currentTerm = 0
         rf.votedFor = None
         rf.commitIndex = 0
