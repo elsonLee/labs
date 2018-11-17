@@ -455,8 +455,6 @@ func (rf *Raft) HandleAppendEntries (appendWrapper AppendEntriesWrapper) Status 
         rf.TryCommitAndApply(Min(reply.MatchIndex, args.LeaderCommit))
     }
 
-    rf.persist()
-
     appendWrapper.Done <- true
 
     return nextStatus
@@ -614,7 +612,7 @@ func (rf *Raft) SendVote (voteReplyCh chan *RequestVoteReply) {
         if i != rf.me {
             go func (server int, replyCh chan *RequestVoteReply) {
                 voteReply := &RequestVoteReply{}
-                rf.Log("RV %d => %d {ter:%d, lastIndex:%d, lastTerm:%d}\n",
+                rf.Log("RV %d => %d {term:%d, lastIndex:%d, lastTerm:%d}\n",
                         rf.me, server, voteRequest.Term,
                         voteRequest.LastLogIndex, voteRequest.LastLogTerm)
 
@@ -697,9 +695,9 @@ func (rf Raft) PrepareAppendEntries (msgType MsgType, index int, len int) *Appen
 
     // FIXME
     prevLogIndex := index-1
-    prevLogTerm := -1
-    if prevLogIndex > 0 {
-        prevLogTerm = rf.log[prevLogIndex-1].Term
+    prevLogTerm := 0
+    if prevLogIndex >= 1 {
+        prevLogTerm = rf.LogEntry(prevLogIndex).Term
     }
 
     appendRequest := &AppendEntriesArgs{Type: msgType,
@@ -709,7 +707,7 @@ func (rf Raft) PrepareAppendEntries (msgType MsgType, index int, len int) *Appen
                                         PrevLogTerm: prevLogTerm,
                                         LeaderCommit: rf.commitIndex}
     for i := 0; i < len; i++ {
-        if index+i-1 >= rf.LastLogIndex() {
+        if index + i - 1 >= rf.LastLogIndex() {
             rf.Log("index: %d, len: %d, lastLogIndex: %d\n",
                     index, i, rf.LastLogIndex())
             panic(0)
@@ -856,7 +854,7 @@ func (rf *Raft) ActAsLeader () Status {
     rf.heartbeatTimeout = kHeartbeatTimeout
     ticker := time.NewTicker(time.Duration(kTick) * time.Millisecond)
 
-    rf.BroadcastAppend()
+    //rf.BroadcastAppend()
 
     nextStatus := rf.status
     for {
@@ -985,50 +983,51 @@ func (rf *Raft) ActAsLeader () Status {
 // for any long-running work.
 //
 func Make(peers []*labrpc.ClientEnd, me int,
-	persister *Persister, applyCh chan ApplyMsg) *Raft {
-	rf := &Raft{}
-	rf.peers = peers
-	rf.persister = persister
-	rf.me = me
+          persister *Persister, applyCh chan ApplyMsg) *Raft {
 
-	// Your initialization code here (2A, 2B, 2C).
-        rf.applyCh = applyCh
-        //rf.debugOn.Set(true)
-        rf.debugOn.Set(false)
-        rf.currentTerm = 0
-        rf.votedFor = None
-        rf.commitIndex = 0
-        rf.lastApplied = 0
-        rf.status = Follower
-        rf.electionTimeout = generateElectionTimeout()
-        rf.voteCh = make(chan RequestVoteWrapper)
-        rf.appendCh = make(chan AppendEntriesWrapper)
-        rf.appendReplyCh = make(chan AppendEntriesReplyWrapper)
-        rf.heartbeatReplyCh = make(chan AppendEntriesReplyWrapper)
-        rf.commandCh = make(chan CommandRequest)
-        rf.stateCh = make(chan chan State)
-        rf.nextIndex = make([]int, len(peers))
-        rf.matchIndex = make([]int, len(peers))
+    rf := &Raft{}
+    rf.peers = peers
+    rf.persister = persister
+    rf.me = me
 
-        nextStatus := Follower
+    // Your initialization code here (2A, 2B, 2C).
+    rf.applyCh = applyCh
+    //rf.debugOn.Set(true)
+    rf.debugOn.Set(false)
+    rf.currentTerm = 0
+    rf.votedFor = None
+    rf.commitIndex = 0
+    rf.lastApplied = 0
+    rf.status = Follower
+    rf.electionTimeout = generateElectionTimeout()
+    rf.voteCh = make(chan RequestVoteWrapper)
+    rf.appendCh = make(chan AppendEntriesWrapper)
+    rf.appendReplyCh = make(chan AppendEntriesReplyWrapper)
+    rf.heartbeatReplyCh = make(chan AppendEntriesReplyWrapper)
+    rf.commandCh = make(chan CommandRequest)
+    rf.stateCh = make(chan chan State)
+    rf.nextIndex = make([]int, len(peers))
+    rf.matchIndex = make([]int, len(peers))
 
-        go func (rf *Raft) {
-            for {
-                rf.status = nextStatus
-                switch nextStatus {
-                case Follower:
-                    nextStatus = rf.ActAsFollower()
-                case Candidate:
-                    nextStatus = rf.ActAsCandidate()
-                case Leader:
-                    nextStatus = rf.ActAsLeader()
-                }
+    nextStatus := Follower
+
+    go func () {
+        for {
+            rf.status = nextStatus
+            switch nextStatus {
+            case Follower:
+                nextStatus = rf.ActAsFollower()
+            case Candidate:
+                nextStatus = rf.ActAsCandidate()
+            case Leader:
+                nextStatus = rf.ActAsLeader()
             }
-        }(rf)
+        }
+    }()
 
-	// initialize from state persisted before a crash
-        rf.readPersist(persister.ReadRaftState())           // FIXME: not thread-safe
+    // initialize from state persisted before a crash
+    rf.readPersist(persister.ReadRaftState())           // FIXME: not thread-safe
 
-	return rf
+    return rf
 }
 
