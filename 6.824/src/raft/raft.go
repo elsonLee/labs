@@ -408,7 +408,7 @@ func (rf *Raft) HandleAppendEntries (appendWrapper AppendEntriesWrapper) Status 
                 reply.Success = false
             } else {
                 if rf.LogEntry(args.PrevLogIndex).Term != args.PrevLogTerm {
-                    for i :=args.PrevLogIndex; i >= Max(1, rf.commitIndex); i-- {
+                    for i := args.PrevLogIndex; i >= Max(1, rf.commitIndex); i-- {
                         if rf.LogEntry(i).Term == rf.LogEntry(args.PrevLogIndex).Term {
                             reply.NextIndexHint = i + 1
                         } else {
@@ -429,6 +429,7 @@ func (rf *Raft) HandleAppendEntries (appendWrapper AppendEntriesWrapper) Status 
                     } else {
                         panic("conflictIndex < 0")
                     }
+                    reply.Success = true
                 }
             }
         }
