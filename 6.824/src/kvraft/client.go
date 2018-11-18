@@ -1,5 +1,6 @@
 package raftkv
 
+import "fmt"
 import "labrpc"
 import "crypto/rand"
 import "math/big"
@@ -38,8 +39,36 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 //
 func (ck *Clerk) Get(key string) string {
 
-	// You will have to modify this function.
-	return ""
+    // You will have to modify this function.
+    args := GetArgs{Key: key}
+
+    fmt.Printf("==> Get %v\n", key)
+    for {
+        hasLeader := false
+        for i, _ := range ck.servers {
+            reply := GetReply{}
+            ok := ck.servers[i].Call("KVServer.Get", &args, &reply)
+            if ok {
+                if reply.WrongLeader == false {
+                    hasLeader = true
+                    if reply.Err == OK {
+                        fmt.Printf("<== Get %v, index:%d, {%v}\n",
+                                    key, reply.Index, reply.Value)
+                        return reply.Value
+                    } else {
+                        fmt.Printf("<xx Get %v, err:%v\n", key, reply.Err)
+                        return ""
+                    }
+                }
+            }
+        }
+
+        if !hasLeader {
+            fmt.Printf("    Get %v : no leader!\n", key)
+        }
+    }
+
+    return ""
 }
 
 //
@@ -53,7 +82,34 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	// You will have to modify this function.
+    // You will have to modify this function.
+    args := PutAppendArgs{Key: key,
+                          Value: value,
+                          Op: op}
+    fmt.Printf("==> %s %v %v\n", op, key, value)
+    for {
+        hasLeader := false
+        for i, _ := range ck.servers {
+            reply := PutAppendReply{}
+            ok := ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
+            if ok {
+                if reply.WrongLeader == false {
+                    hasLeader = true
+                    if reply.Err == OK {
+                        fmt.Printf("<== %s %v %v, index:%d\n", op, key, value, reply.Index)
+                        return
+                    } else {
+                        fmt.Printf("<xx %s %v %v, err:%v\n", op, key, value, reply.Err)
+                        return
+                    }
+                }
+            }
+        }
+
+        if !hasLeader {
+            fmt.Printf("    %s %v %v : no leader!\n", op, key, value)
+        }
+    }
 }
 
 func (ck *Clerk) Put(key string, value string) {

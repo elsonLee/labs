@@ -1,11 +1,13 @@
 package raftkv
 
 import (
-	"labgob"
-	"labrpc"
-	"log"
-	"raft"
-	"sync"
+    "labgob"
+    "labrpc"
+    "time"
+    "log"
+    "raft"
+    "sync"
+    "sync/atomic"
 )
 
 const Debug = 0
@@ -17,11 +19,25 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
+const (
+    C_Put       string = "Put"
+    C_Append    string = "Append"
+    C_Get       string = "Get"
+)
 
 type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+    // Your definitions here.
+    // Field names must start with capital letters,
+    // otherwise RPC will break.
+    Type        string
+    Key         string
+    Uuid        int32
+    Value       string
+}
+
+type OpReply struct {
+    Err         Err
+    Value       string
 }
 
 type KVServer struct {
@@ -33,15 +49,32 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+        db      map[string]string
+
+        uuid    int32
+
+        opReplyMapMtx   sync.Mutex
+        opReplyMap      map[int32]chan OpReply
+
+        getCh           chan GetRequest
+        putAppendCh     chan PutAppendRequest
 }
 
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
+    // Your code here.
+    request := GetRequest{Args: args,
+                          ReplyCh: make(chan GetReply)}
+    kv.getCh <- request
+    *reply = <-request.ReplyCh
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
+    // Your code here.
+    request := PutAppendRequest{Args: args,
+                                ReplyCh: make(chan PutAppendReply)}
+    kv.putAppendCh <- request
+    *reply = <-request.ReplyCh
 }
 
 //
@@ -54,6 +87,118 @@ func (kv *KVServer) Kill() {
 	kv.rf.Kill()
 	// Your code here, if desired.
 }
+
+
+func (kv *KVServer) RegisterOpReplyCh (uuid int32, opReplyCh chan OpReply) {
+    kv.opReplyMapMtx.Lock()
+    _, ok := kv.opReplyMap[uuid]
+    if ok {
+        panic("already has uuid in map!")
+    }
+    kv.opReplyMap[uuid] = opReplyCh
+    kv.opReplyMapMtx.Unlock()
+}
+
+
+func (kv *KVServer) UnregisterOpReplyCh (uuid int32) {
+    kv.opReplyMapMtx.Lock()
+    _, ok := kv.opReplyMap[uuid]
+    if !ok {
+        panic("no uuid in map!")
+    }
+    delete(kv.opReplyMap, uuid)
+    kv.opReplyMapMtx.Unlock()
+}
+
+
+func (kv *KVServer) GetInLoop (request *GetRequest) {
+    args := request.Args
+    replyCh := request.ReplyCh
+
+    uuid := atomic.AddInt32(&kv.uuid, 1)
+    opReplyCh := make(chan OpReply)
+    kv.RegisterOpReplyCh(uuid, opReplyCh)
+
+    op := Op{Type: C_Get,
+             Uuid: uuid,
+             Key: args.Key}
+    index, _, isLeader := kv.rf.Start(op)
+
+    go func () {
+        if isLeader {
+            opReply := <-opReplyCh
+            replyCh <- GetReply{WrongLeader: false,
+                                Err: opReply.Err,
+                                Index: index,
+                                Value: opReply.Value}
+        } else {
+            replyCh <- GetReply{WrongLeader: true}
+            <-opReplyCh    // FIXME
+        }
+        kv.UnregisterOpReplyCh(uuid)
+    }()
+}
+
+
+func (kv *KVServer) PutAppendInLoop (request *PutAppendRequest) {
+    args := request.Args
+    replyCh := request.ReplyCh
+
+    uuid := atomic.AddInt32(&kv.uuid, 1)
+    opReplyCh := make(chan OpReply)
+    kv.RegisterOpReplyCh(uuid, opReplyCh)
+
+    op := Op{Type: args.Op,
+             Uuid: uuid,
+             Key: args.Key,
+             Value: args.Value}
+    index, _, isLeader := kv.rf.Start(op)
+
+    go func () {
+        if isLeader {
+            opReply := <-opReplyCh
+            replyCh <- PutAppendReply{WrongLeader: false,
+                                      Err: opReply.Err,
+                                      Index: index}
+        } else {
+            replyCh <- PutAppendReply{WrongLeader: true}
+            <-opReplyCh    // FIXME
+        }
+        kv.UnregisterOpReplyCh(uuid)
+    }()
+}
+
+
+func (kv *KVServer) ApplyOp (op Op) OpReply {
+    switch op.Type {
+    case C_Put:
+        kv.db[op.Key] = op.Value
+        return OpReply{Err: OK,
+                       Value: op.Value}
+
+    case C_Append:
+        v, ok := kv.db[op.Key]
+        if ok {
+            kv.db[op.Key] = v + op.Value
+        } else {
+            kv.db[op.Key] = op.Value
+        }
+        return OpReply{Err: OK,
+                       Value: kv.db[op.Key]}
+
+    case C_Get:
+        v, ok := kv.db[op.Key]
+        if ok {
+            return OpReply{Err: OK,
+                           Value: v}
+        } else {
+            return OpReply{Err: ErrNoKey}
+        }
+    default:
+        panic(0)
+    }
+}
+
 
 //
 // servers[] contains the ports of the set of
@@ -70,20 +215,67 @@ func (kv *KVServer) Kill() {
 // for any long-running work.
 //
 func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *KVServer {
-	// call labgob.Register on structures you want
-	// Go's RPC library to marshall/unmarshall.
-	labgob.Register(Op{})
+    // call labgob.Register on structures you want
+    // Go's RPC library to marshall/unmarshall.
+    labgob.Register(Op{})
 
-	kv := new(KVServer)
-	kv.me = me
-	kv.maxraftstate = maxraftstate
+    kv := new(KVServer)
+    kv.me = me
+    kv.maxraftstate = maxraftstate
 
-	// You may need initialization code here.
+    // You may need initialization code here.
+    kv.getCh = make(chan GetRequest)
+    kv.putAppendCh = make(chan PutAppendRequest)
+    kv.uuid = 0
+    kv.db = make(map[string]string)
+    kv.opReplyMap = make(map[int32]chan OpReply)
+    kv.applyCh = make(chan raft.ApplyMsg)
 
-	kv.applyCh = make(chan raft.ApplyMsg)
-	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+    kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
-	// You may need initialization code here.
+    // You may need initialization code here.
+    go func () {
+        for {
+            ticker := time.NewTicker(time.Duration(3) * time.Second)
+            select {
+            case getRequest := <-kv.getCh:
+                kv.GetInLoop(&getRequest)
 
-	return kv
+            case putAppendRequest := <-kv.putAppendCh:
+                kv.PutAppendInLoop(&putAppendRequest)
+
+            case <-ticker.C:
+                // DPrintf("No request timeout!\n")
+            }
+        }
+    }()
+
+    go func () {
+        for {
+            select {
+            case applyMsg := <-kv.applyCh:
+                if op, valid := applyMsg.Command.(Op); valid {
+
+                    opReply := kv.ApplyOp(op)
+                    uuid := op.Uuid
+
+                    var ch chan OpReply
+                    var ok bool
+
+                    kv.opReplyMapMtx.Lock()
+                    ch, ok = kv.opReplyMap[uuid]
+                    kv.opReplyMapMtx.Unlock()
+
+                    if ok {
+                        ch <- opReply
+                    }
+
+                } else {
+                    panic("invalid applyMsg!")
+                }
+            }
+        }
+    }()
+
+    return kv
 }
