@@ -534,9 +534,10 @@ func (rf *Raft) Start (command interface{}) (int, int, bool) {
                                      ReplyCh: replyCh}
     rf.commandCh <- commandRequest
     reply := <-commandRequest.ReplyCh
-    if reply.IsLeader {
-        //rf.Log("Start: {%d, %v}, isLeader: %v\n", reply.Index, command, reply.IsLeader)
-    }
+
+    //if reply.IsLeader {
+        rf.Log("reply Command: {%d, %v}, isLeader: %v\n", reply.Index, command, reply.IsLeader)
+    //}
     return reply.Index, reply.Term, reply.IsLeader
 }
 
@@ -937,7 +938,7 @@ func (rf *Raft) ActAsLeader () Status {
                     rf.me, server, reply.MatchIndex, reply.NextIndexHint, reply.Success)
 
             if reply.Success == true {
-                rf.matchIndex[server] = heartbeatReplyWrapper.Index
+                rf.matchIndex[server] = reply.MatchIndex
                 rf.nextIndex[server] = rf.matchIndex[server] + 1
 
                 if rf.matchIndex[server] < rf.LastLogIndex() {
@@ -992,8 +993,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
     // Your initialization code here (2A, 2B, 2C).
     rf.applyCh = applyCh
-    //rf.debugOn.Set(true)
-    rf.debugOn.Set(false)
+    rf.debugOn.Set(true)
+    //rf.debugOn.Set(false)
     rf.currentTerm = 0
     rf.votedFor = None
     rf.commitIndex = 0
