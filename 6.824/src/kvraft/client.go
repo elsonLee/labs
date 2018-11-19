@@ -7,9 +7,10 @@ import "math/big"
 
 
 type Clerk struct {
-    servers []*labrpc.ClientEnd
+    servers     []*labrpc.ClientEnd
     // You will have to modify this struct.
-    me      int64
+    me             int64
+    leaderHint     int
 }
 
 func nrand() int64 {
@@ -24,6 +25,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
     ck.servers = servers
     // You'll have to add code here.
     ck.me = nrand()
+    ck.leaderHint = 0
 
     return ck
 }
@@ -55,23 +57,23 @@ func (ck *Clerk) Get(key string) string {
     ck.Log("==> Get %v\n", key)
     for {
         hasLeader := false
-        for i, _ := range ck.servers {
-            reply := GetReply{}
-            ok := ck.servers[i].Call("KVServer.Get", &args, &reply)
-            if ok {
-                if reply.WrongLeader == false {
-                    hasLeader = true
-                    if reply.Err == OK {
-                        ck.Log("<== Get %v, index:%d, {%v}\n",
-                                    key, reply.Index, reply.Value)
-                        return reply.Value
-                    } else {
-                        ck.Log("<xx Get %v, err:%v\n", key, reply.Err)
-                        return ""
-                    }
+        i := ck.leaderHint
+        reply := GetReply{}
+        ok := ck.servers[i].Call("KVServer.Get", &args, &reply)
+        if ok {
+            if reply.WrongLeader == false {
+                hasLeader = true
+                if reply.Err == OK {
+                    ck.Log("<== Get %v, index:%d, {%v}\n",
+                                key, reply.Index, reply.Value)
+                    return reply.Value
+                } else {
+                    ck.Log("<xx Get %v, err:%v\n", key, reply.Err)
+                    return ""
                 }
             }
         }
+        ck.leaderHint = (ck.leaderHint + 1) % len(ck.servers)
 
         if !hasLeader {
             ck.Log("Get %v : no leader!\n", key)
@@ -101,25 +103,25 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
     ck.Log("==> %s key:%v value:%v\n", op, key, value)
     for {
         hasLeader := false
-        for i, _ := range ck.servers {
-            reply := PutAppendReply{}
-            ok := ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
-            if ok {
-                ck.Log("server %d, value:%v, WrongLeader: %v\n", i, value, reply.WrongLeader)
-                if reply.WrongLeader == false {
-                    hasLeader = true
-                    if reply.Err == OK {
-                        ck.Log("<== %s %v %v, index:%d\n", op, key, value, reply.Index)
-                        return
-                    } else {
-                        ck.Log("<xx %s %v %v, err:%v\n", op, key, value, reply.Err)
-                        return
-                    }
+        i := ck.leaderHint
+        reply := PutAppendReply{}
+        ok := ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
+        if ok {
+            ck.Log("server %d, value:%v, WrongLeader: %v\n", i, value, reply.WrongLeader)
+            if reply.WrongLeader == false {
+                hasLeader = true
+                if reply.Err == OK {
+                    ck.Log("<== %s %v %v, index:%d\n", op, key, value, reply.Index)
+                    return
+                } else {
+                    ck.Log("<xx %s %v %v, err:%v\n", op, key, value, reply.Err)
+                    return
                 }
-            } else {
-                ck.Log("server %d, value:%v, network timeout!\n", i, value)
             }
+        } else {
+            ck.Log("server %d, value:%v, network timeout!\n", i, value)
         }
+        ck.leaderHint = (ck.leaderHint + 1) % len(ck.servers)
 
         if !hasLeader {
             ck.Log("%s %v %v : no leader!\n", op, key, value)
