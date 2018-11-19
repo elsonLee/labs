@@ -29,9 +29,11 @@ type Op struct {
     // Your definitions here.
     // Field names must start with capital letters,
     // otherwise RPC will break.
+    ID          int64
+    Clerk       int64
+    Uuid        int32
     Type        string
     Key         string
-    Uuid        int32
     Value       string
 }
 
@@ -48,8 +50,9 @@ type KVServer struct {
 
 	maxraftstate int // snapshot if log grows this big
 
-	// Your definitions here.
-        db      map[string]string
+        // Your definitions here.
+        db              map[string]string
+        lastApplied     map[int64]int64     // clerk -> args.ID
 
         uuid    int32
 
@@ -74,7 +77,11 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
     request := PutAppendRequest{Args: args,
                                 ReplyCh: make(chan PutAppendReply)}
     kv.putAppendCh <- request
-    *reply = <-request.ReplyCh
+    resp := <-request.ReplyCh
+
+    DPrintf("server: %d, value: %v, wrongLeader: %v\n", kv.me, args.Value, reply.WrongLeader)
+
+    *reply = resp
 }
 
 //
@@ -119,8 +126,10 @@ func (kv *KVServer) GetInLoop (request *GetRequest) {
     opReplyCh := make(chan OpReply)
     kv.RegisterOpReplyCh(uuid, opReplyCh)
 
-    op := Op{Type: C_Get,
+    op := Op{ID: args.ID,
+             Clerk: args.Clerk,
              Uuid: uuid,
+             Type: C_Get,
              Key: args.Key}
     index, _, isLeader := kv.rf.Start(op)
 
@@ -148,8 +157,10 @@ func (kv *KVServer) PutAppendInLoop (request *PutAppendRequest) {
     opReplyCh := make(chan OpReply)
     kv.RegisterOpReplyCh(uuid, opReplyCh)
 
-    op := Op{Type: args.Op,
+    op := Op{ID: args.ID,
+             Clerk: args.Clerk,
              Uuid: uuid,
+             Type: args.Op,
              Key: args.Key,
              Value: args.Value}
     index, _, isLeader := kv.rf.Start(op)
@@ -170,6 +181,18 @@ func (kv *KVServer) PutAppendInLoop (request *PutAppendRequest) {
 
 
 func (kv *KVServer) ApplyOp (op Op) OpReply {
+    clerk := op.Clerk
+    id := op.ID
+
+    // duplicated request
+    if kv.lastApplied[clerk] == id && op.Type != C_Get {
+        DPrintf("skip duplicated operation: %v\n", op)
+        return OpReply{Err: OK,
+                       Value: kv.db[op.Key]}
+    } else {
+        kv.lastApplied[clerk] = id
+    }
+
     switch op.Type {
     case C_Put:
         kv.db[op.Key] = op.Value
@@ -228,6 +251,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
     kv.putAppendCh = make(chan PutAppendRequest)
     kv.uuid = 0
     kv.db = make(map[string]string)
+    kv.lastApplied = make(map[int64]int64)
     kv.opReplyMap = make(map[int32]chan OpReply)
     kv.applyCh = make(chan raft.ApplyMsg)
 

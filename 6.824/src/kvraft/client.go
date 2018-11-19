@@ -7,8 +7,9 @@ import "math/big"
 
 
 type Clerk struct {
-	servers []*labrpc.ClientEnd
-	// You will have to modify this struct.
+    servers []*labrpc.ClientEnd
+    // You will have to modify this struct.
+    me      int64
 }
 
 func nrand() int64 {
@@ -19,10 +20,17 @@ func nrand() int64 {
 }
 
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
-	ck := new(Clerk)
-	ck.servers = servers
-	// You'll have to add code here.
-	return ck
+    ck := new(Clerk)
+    ck.servers = servers
+    // You'll have to add code here.
+    ck.me = nrand()
+
+    return ck
+}
+
+func (ck *Clerk) Log (format string, a ...interface{}) {
+    fmt.Printf("[clerk] %s",
+                fmt.Sprintf(format, a...))
 }
 
 //
@@ -40,9 +48,11 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
     // You will have to modify this function.
-    args := GetArgs{Key: key}
+    args := GetArgs{ID: nrand(),
+                    Clerk: ck.me,
+                    Key: key}
 
-    fmt.Printf("==> Get %v\n", key)
+    ck.Log("==> Get %v\n", key)
     for {
         hasLeader := false
         for i, _ := range ck.servers {
@@ -52,11 +62,11 @@ func (ck *Clerk) Get(key string) string {
                 if reply.WrongLeader == false {
                     hasLeader = true
                     if reply.Err == OK {
-                        fmt.Printf("<== Get %v, index:%d, {%v}\n",
+                        ck.Log("<== Get %v, index:%d, {%v}\n",
                                     key, reply.Index, reply.Value)
                         return reply.Value
                     } else {
-                        fmt.Printf("<xx Get %v, err:%v\n", key, reply.Err)
+                        ck.Log("<xx Get %v, err:%v\n", key, reply.Err)
                         return ""
                     }
                 }
@@ -64,7 +74,7 @@ func (ck *Clerk) Get(key string) string {
         }
 
         if !hasLeader {
-            fmt.Printf("    Get %v : no leader!\n", key)
+            ck.Log("Get %v : no leader!\n", key)
         }
     }
 
@@ -83,31 +93,36 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
     // You will have to modify this function.
-    args := PutAppendArgs{Key: key,
+    args := PutAppendArgs{ID: nrand(),
+                          Clerk: ck.me,
+                          Key: key,
                           Value: value,
                           Op: op}
-    fmt.Printf("==> %s %v %v\n", op, key, value)
+    ck.Log("==> %s key:%v value:%v\n", op, key, value)
     for {
         hasLeader := false
         for i, _ := range ck.servers {
             reply := PutAppendReply{}
             ok := ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
             if ok {
+                ck.Log("server %d, value:%v, WrongLeader: %v\n", i, value, reply.WrongLeader)
                 if reply.WrongLeader == false {
                     hasLeader = true
                     if reply.Err == OK {
-                        fmt.Printf("<== %s %v %v, index:%d\n", op, key, value, reply.Index)
+                        ck.Log("<== %s %v %v, index:%d\n", op, key, value, reply.Index)
                         return
                     } else {
-                        fmt.Printf("<xx %s %v %v, err:%v\n", op, key, value, reply.Err)
+                        ck.Log("<xx %s %v %v, err:%v\n", op, key, value, reply.Err)
                         return
                     }
                 }
+            } else {
+                ck.Log("server %d, value:%v, network timeout!\n", i, value)
             }
         }
 
         if !hasLeader {
-            fmt.Printf("    %s %v %v : no leader!\n", op, key, value)
+            ck.Log("%s %v %v : no leader!\n", op, key, value)
         }
     }
 }
