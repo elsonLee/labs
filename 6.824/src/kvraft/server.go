@@ -135,11 +135,19 @@ func (kv *KVServer) GetInLoop (request *GetRequest) {
 
     go func () {
         if isLeader {
-            opReply := <-opReplyCh
-            replyCh <- GetReply{WrongLeader: false,
-                                Err: opReply.Err,
-                                Index: index,
-                                Value: opReply.Value}
+            ticker := time.NewTicker(time.Duration(3) * time.Second)
+            for {
+                select {
+                case opReply := <-opReplyCh:
+                    replyCh <- GetReply{WrongLeader: false,
+                                        Err: opReply.Err,
+                                        Index: index,
+                                        Value: opReply.Value}
+                case <-ticker.C:
+                    replyCh <- GetReply{WrongLeader: true}
+                    <-opReplyCh    // FIXME
+                }
+            }
         } else {
             replyCh <- GetReply{WrongLeader: true}
             <-opReplyCh    // FIXME
@@ -167,10 +175,18 @@ func (kv *KVServer) PutAppendInLoop (request *PutAppendRequest) {
 
     go func () {
         if isLeader {
-            opReply := <-opReplyCh
-            replyCh <- PutAppendReply{WrongLeader: false,
-                                      Err: opReply.Err,
-                                      Index: index}
+            ticker := time.NewTicker(time.Duration(3) * time.Second)
+            for {
+                select {
+                case opReply := <-opReplyCh:
+                    replyCh <- PutAppendReply{WrongLeader: false,
+                                              Err: opReply.Err,
+                                              Index: index}
+                case <-ticker.C:
+                    replyCh <- PutAppendReply{WrongLeader: true}
+                    <-opReplyCh    // FIXME
+                }
+            }
         } else {
             replyCh <- PutAppendReply{WrongLeader: true}
             <-opReplyCh    // FIXME
