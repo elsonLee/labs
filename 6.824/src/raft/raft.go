@@ -157,6 +157,20 @@ func (rf *Raft) GetState () (int, bool) {
 }
 
 
+func (rf *Raft) PersistentState () []byte {
+
+    w := new(bytes.Buffer)
+    e := labgob.NewEncoder(w)
+    e.Encode(rf.currentTerm)
+    e.Encode(rf.votedFor)
+    e.Encode(rf.log)
+    //e.Encode(rf.matchIndex)
+    data := w.Bytes()
+
+    return data
+}
+
+
 //
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
@@ -171,13 +185,7 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
-        w := new(bytes.Buffer)
-        e := labgob.NewEncoder(w)
-        e.Encode(rf.currentTerm)
-        e.Encode(rf.votedFor)
-        e.Encode(rf.log)
-        //e.Encode(rf.matchIndex)
-        data := w.Bytes()
+        data := rf.PersistentState()
         rf.persister.SaveRaftState(data)
 }
 
@@ -221,6 +229,13 @@ func (rf *Raft) readPersist(data []byte) {
         }
 }
 
+func (rf *Raft) SaveSnapshot (snapshot []byte) {
+    rf.persister.SaveStateAndSnapshot(rf.PersistentState(), snapshot)
+}
+
+func (rf *Raft) LoadSnapshot () []byte {
+    return rf.persister.ReadSnapshot()
+}
 
 func (rf *Raft) LogEntry (index int) LogEntry {
     if index <= 0 || index > rf.LastLogIndex() {
@@ -277,6 +292,7 @@ func (rf *Raft) TryCommitAndApply (leaderCommited int) {
                                 CommandIndex: i}
                 rf.Log("apply msg: %d %v\n", msg.CommandIndex, msg.Command)
                 rf.applyCh <- msg
+                rf.Log("apply msg succ: %d %v\n", msg.CommandIndex, msg.Command)
 
             } else {
                 rf.Log("apply no-op: %d\n", i)
@@ -311,6 +327,7 @@ func (rf *Raft) CheckQuorumThenTryCommitApply () {
                                 CommandIndex: i}
                 rf.Log("apply msg: %d %v\n", msg.CommandIndex, msg.Command)
                 rf.applyCh <- msg
+                rf.Log("apply msg succ: %d %v\n", msg.CommandIndex, msg.Command)
             } else {
                 rf.Log("apply no-op: %d\n", i)
             }
@@ -576,8 +593,13 @@ func (rf *Raft) Start (command interface{}) (int, int, bool) {
     commandRequest := CommandRequest{IsNoOp: false,
                                      Command: command,
                                      ReplyCh: replyCh}
+
+    rf.Log("Start: %v\n", commandRequest.Command)
+
     rf.commandCh <- commandRequest
     reply := <-commandRequest.ReplyCh
+
+    rf.Log("Reply: %v\n", commandRequest.Command)
 
     //if reply.IsLeader {
     //    rf.Log("reply Command: {%d, %v}, isLeader: %v\n", reply.Index, command, reply.IsLeader)

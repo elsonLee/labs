@@ -14,10 +14,10 @@ type Clerk struct {
 }
 
 func nrand() int64 {
-	max := big.NewInt(int64(1) << 62)
-	bigx, _ := rand.Int(rand.Reader, max)
-	x := bigx.Int64()
-	return x
+    max := big.NewInt(int64(1) << 62)
+    bigx, _ := rand.Int(rand.Reader, max)
+    x := bigx.Int64()
+    return x
 }
 
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
@@ -31,8 +31,10 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 }
 
 func (ck *Clerk) Log (format string, a ...interface{}) {
-    fmt.Printf("[clerk] %s",
-                fmt.Sprintf(format, a...))
+    if true {
+        fmt.Printf("[clerk] %s",
+                    fmt.Sprintf(format, a...))
+    }
 }
 
 //
@@ -54,13 +56,15 @@ func (ck *Clerk) Get(key string) string {
                     Clerk: ck.me,
                     Key: key}
 
-    ck.Log("==> Get %v\n", key)
+    ck.Log("==> Get %v id:%v\n", key, args.ID)
 
     hasLeader := false
     oldleaderHint := ck.leaderHint
     for {
         i := ck.leaderHint
         reply := GetReply{}
+
+        ck.Log(" => Get request server %d\n", i)
         ok := ck.servers[i].Call("KVServer.Get", &args, &reply)
         if ok {
             if reply.WrongLeader == false {
@@ -74,11 +78,13 @@ func (ck *Clerk) Get(key string) string {
                     return ""
                 }
             }
+        } else {
+            ck.Log("Get server %d, network timeout!\n", i)
         }
         ck.leaderHint = (ck.leaderHint + 1) % len(ck.servers)
 
         if ck.leaderHint == oldleaderHint && !hasLeader {
-            ck.Log("Get %v : no leader!\n", key)
+            ck.Log("Get %v id:%v: no leader!\n", key, args.ID)
         }
     }
 
@@ -102,13 +108,14 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
                           Key: key,
                           Value: value,
                           Op: op}
-    ck.Log("==> %s key:%v value:%v\n", op, key, value)
+    ck.Log("==> %s key:%v value:%v id:%v\n", op, key, value, args.ID)
     hasLeader := false
     oldleaderHint := ck.leaderHint
     for {
         i := ck.leaderHint
         reply := PutAppendReply{}
 
+        ck.Log(" => %s request server %d\n", op, i)
         ok := ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
         if ok {
             ck.Log("server %d, value:%v, WrongLeader: %v\n", i, value, reply.WrongLeader)
@@ -123,12 +130,12 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
                 }
             }
         } else {
-            ck.Log("server %d, value:%v, network timeout!\n", i, value)
+            ck.Log("%d server %d, value:%v, network timeout!\n", op, i, value)
         }
         ck.leaderHint = (ck.leaderHint + 1) % len(ck.servers)
 
         if ck.leaderHint == oldleaderHint && !hasLeader {
-            ck.Log("%s %v %v : no leader!\n", op, key, value)
+            ck.Log("%s %v %v id:%v: no leader!\n", op, key, value, args.ID)
         }
     }
 }

@@ -3,6 +3,7 @@ package raftkv
 import (
     "labgob"
     "labrpc"
+    "bytes"
     "time"
     "log"
     "raft"
@@ -40,6 +41,10 @@ type Op struct {
 type OpReply struct {
     Err         Err
     Value       string
+}
+
+type KVPersistence struct {
+    Db          map[string]string
 }
 
 type KVServer struct {
@@ -154,6 +159,7 @@ func (kv *KVServer) GetInLoop (request *GetRequest) {
                 <-opReplyCh    // FIXME
             }
         } else {
+            DPrintf("nserver %d wait on chan %v\n", kv.me, opReplyCh)
             replyCh <- GetReply{WrongLeader: true}
             <-opReplyCh    // FIXME
         }
@@ -195,6 +201,7 @@ func (kv *KVServer) PutAppendInLoop (request *PutAppendRequest) {
                 <-opReplyCh    // FIXME
             }
         } else {
+            DPrintf("nserver %d wait on chan %v\n", kv.me, opReplyCh)
             replyCh <- PutAppendReply{WrongLeader: true}
             <-opReplyCh    // FIXME
         }
@@ -246,6 +253,32 @@ func (kv *KVServer) ApplyOp (op Op) OpReply {
     }
 }
 
+func (kv *KVServer) SaveSnapshot () {
+    w := new(bytes.Buffer)
+    e := labgob.NewEncoder(w)
+
+    obj := KVPersistence{Db: kv.db}
+    e.Encode(obj)
+
+    data := w.Bytes()
+
+    kv.rf.SaveSnapshot(data)
+}
+
+func (kv *KVServer) LoadSnapshot () {
+    data := kv.rf.LoadSnapshot()
+
+    r := bytes.NewBuffer(data)
+    d := labgob.NewDecoder(r)
+
+    p := KVPersistence{}
+    if d.Decode(&p) != nil {
+        panic("load Snapshot error!")
+    } else {
+        kv.db = p.Db
+    }
+}
+
 
 //
 // servers[] contains the ports of the set of
@@ -282,6 +315,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
     kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
     // You may need initialization code here.
+    kv.LoadSnapshot()
+
     go func () {
         for {
             ticker := time.NewTicker(time.Duration(3) * time.Second)
@@ -306,6 +341,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
                     opReply := kv.ApplyOp(op)
                     uuid := op.Uuid
+
+                    kv.SaveSnapshot()
 
                     var ch chan OpReply
                     var ok bool
