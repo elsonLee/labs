@@ -10,13 +10,13 @@ import (
     "sync/atomic"
 )
 
-const Debug = 0
+const Debug = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug > 0 {
-		log.Printf(format, a...)
-	}
-	return
+    if Debug > 0 {
+        log.Printf(format, a...)
+    }
+    return
 }
 
 const (
@@ -69,7 +69,11 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
     request := GetRequest{Args: args,
                           ReplyCh: make(chan GetReply)}
     kv.getCh <- request
-    *reply = <-request.ReplyCh
+    resp := <-request.ReplyCh
+
+    DPrintf("server: %d, wrongLeader: %v\n", kv.me, reply.WrongLeader)
+
+    *reply = resp
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
@@ -131,27 +135,29 @@ func (kv *KVServer) GetInLoop (request *GetRequest) {
              Uuid: uuid,
              Type: C_Get,
              Key: args.Key}
+
     index, _, isLeader := kv.rf.Start(op)
 
     go func () {
         if isLeader {
-            ticker := time.NewTicker(time.Duration(3) * time.Second)
-            for {
-                select {
-                case opReply := <-opReplyCh:
-                    replyCh <- GetReply{WrongLeader: false,
-                                        Err: opReply.Err,
-                                        Index: index,
-                                        Value: opReply.Value}
-                case <-ticker.C:
-                    replyCh <- GetReply{WrongLeader: true}
-                    <-opReplyCh    // FIXME
-                }
+            ticker := time.NewTicker(time.Duration(1) * time.Second)
+            DPrintf("server %d wait on chan %v\n", kv.me, opReplyCh)
+            select {
+            case opReply := <-opReplyCh:
+                replyCh <- GetReply{WrongLeader: false,
+                                    Err: opReply.Err,
+                                    Index: index,
+                                    Value: opReply.Value}
+            case <-ticker.C:
+                DPrintf("GetInLoop timeout! on chan %v\n", opReplyCh)
+                replyCh <- GetReply{WrongLeader: true}
+                <-opReplyCh    // FIXME
             }
         } else {
             replyCh <- GetReply{WrongLeader: true}
             <-opReplyCh    // FIXME
         }
+        DPrintf("server %d wait on chan %v quit...\n", kv.me, opReplyCh)
         kv.UnregisterOpReplyCh(uuid)
     }()
 }
@@ -171,26 +177,28 @@ func (kv *KVServer) PutAppendInLoop (request *PutAppendRequest) {
              Type: args.Op,
              Key: args.Key,
              Value: args.Value}
+
     index, _, isLeader := kv.rf.Start(op)
 
     go func () {
         if isLeader {
-            ticker := time.NewTicker(time.Duration(3) * time.Second)
-            for {
-                select {
-                case opReply := <-opReplyCh:
-                    replyCh <- PutAppendReply{WrongLeader: false,
-                                              Err: opReply.Err,
-                                              Index: index}
-                case <-ticker.C:
-                    replyCh <- PutAppendReply{WrongLeader: true}
-                    <-opReplyCh    // FIXME
-                }
+            ticker := time.NewTicker(time.Duration(1) * time.Second)
+            DPrintf("server %d wait on chan %v\n", kv.me, opReplyCh)
+            select {
+            case opReply := <-opReplyCh:
+                replyCh <- PutAppendReply{WrongLeader: false,
+                                          Err: opReply.Err,
+                                          Index: index}
+            case <-ticker.C:
+                DPrintf("server %d PutAppendInLoop timeout! on chan %v\n", kv.me, opReplyCh)
+                replyCh <- PutAppendReply{WrongLeader: true}
+                <-opReplyCh    // FIXME
             }
         } else {
             replyCh <- PutAppendReply{WrongLeader: true}
             <-opReplyCh    // FIXME
         }
+        DPrintf("server %d wait on chan %v quit...\n", kv.me, opReplyCh)
         kv.UnregisterOpReplyCh(uuid)
     }()
 }
@@ -285,7 +293,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
                 kv.PutAppendInLoop(&putAppendRequest)
 
             case <-ticker.C:
-                // DPrintf("No request timeout!\n")
+                //DPrintf("kvserver: No request timeout!\n")
             }
         }
     }()
@@ -307,7 +315,17 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
                     kv.opReplyMapMtx.Unlock()
 
                     if ok {
-                        ch <- opReply
+                        Loop:
+                        for {
+                            ticker := time.NewTicker(time.Duration(1) * time.Second)
+                            select {
+                            case ch <- opReply:
+                                break Loop
+                            case <-ticker.C:
+                                DPrintf("Server %d stuck in apply loop on chan %v !!!\n",
+                                        kv.me, ch)
+                            }
+                        }
                     }
 
                 } else {
