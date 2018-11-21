@@ -55,8 +55,10 @@ func (ck *Clerk) Get(key string) string {
                     Key: key}
 
     ck.Log("==> Get %v\n", key)
+
+    hasLeader := false
+    oldleaderHint := ck.leaderHint
     for {
-        hasLeader := false
         i := ck.leaderHint
         reply := GetReply{}
         ok := ck.servers[i].Call("KVServer.Get", &args, &reply)
@@ -75,7 +77,7 @@ func (ck *Clerk) Get(key string) string {
         }
         ck.leaderHint = (ck.leaderHint + 1) % len(ck.servers)
 
-        if !hasLeader {
+        if ck.leaderHint == oldleaderHint && !hasLeader {
             ck.Log("Get %v : no leader!\n", key)
         }
     }
@@ -101,10 +103,12 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
                           Value: value,
                           Op: op}
     ck.Log("==> %s key:%v value:%v\n", op, key, value)
+    hasLeader := false
+    oldleaderHint := ck.leaderHint
     for {
-        hasLeader := false
         i := ck.leaderHint
         reply := PutAppendReply{}
+
         ok := ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
         if ok {
             ck.Log("server %d, value:%v, WrongLeader: %v\n", i, value, reply.WrongLeader)
@@ -123,7 +127,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
         }
         ck.leaderHint = (ck.leaderHint + 1) % len(ck.servers)
 
-        if !hasLeader {
+        if ck.leaderHint == oldleaderHint && !hasLeader {
             ck.Log("%s %v %v : no leader!\n", op, key, value)
         }
     }
@@ -132,6 +136,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 func (ck *Clerk) Put(key string, value string) {
 	ck.PutAppend(key, value, "Put")
 }
+
 func (ck *Clerk) Append(key string, value string) {
 	ck.PutAppend(key, value, "Append")
 }
