@@ -66,6 +66,7 @@ type ApplyMsg struct {
 
 type LogEntry struct {
     Term        int
+    IsNoOp      bool
     Command     interface{}
 }
 
@@ -268,13 +269,55 @@ func (rf *Raft) TryCommitAndApply (leaderCommited int) {
     if leaderCommited > rf.commitIndex {
         rf.commitIndex = Min(leaderCommited, rf.LastLogIndex())
         for i := oldCommitIndex + 1; i <= rf.commitIndex; i++ {
-            msg := ApplyMsg{CommandValid: true,
-                            Command: rf.LogEntry(i).Command,
-                            CommandIndex: i}
-            rf.Log("apply msg: %d %v\n", msg.CommandIndex, msg.Command)
-            rf.applyCh <- msg
+            entry := rf.LogEntry(i)
+            if !entry.IsNoOp {
+
+                msg := ApplyMsg{CommandValid: true,
+                                Command: entry.Command,
+                                CommandIndex: i}
+                rf.Log("apply msg: %d %v\n", msg.CommandIndex, msg.Command)
+                rf.applyCh <- msg
+
+            } else {
+                rf.Log("apply no-op: %d\n", i)
+            }
             rf.lastApplied = rf.commitIndex
         }
+    }
+}
+
+
+func (rf *Raft) CheckQuorumThenTryCommitApply () {
+
+    var matches []int
+    for i := 0; i < len(rf.peers); i++ {
+        if i != rf.me {
+            matches = append(matches, rf.matchIndex[i])
+        }
+    }
+    sort.Ints(matches)
+    newCommitIndex := matches[len(rf.peers)-(len(rf.peers)/2+1)]
+
+    if newCommitIndex > rf.commitIndex &&
+       rf.LogEntry(newCommitIndex).Term == rf.currentTerm { // Figure 8
+        rf.Log("sorted matches: %v, newCommandIndex:%d\n", matches, newCommitIndex)
+        rf.persist()
+
+        for i := rf.commitIndex + 1; i <= newCommitIndex; i++ {
+            entry := rf.LogEntry(i)
+            if !entry.IsNoOp {
+                msg := ApplyMsg{CommandValid: true,
+                                Command: rf.LogEntry(i).Command,
+                                CommandIndex: i}
+                rf.Log("apply msg: %d %v\n", msg.CommandIndex, msg.Command)
+                rf.applyCh <- msg
+            } else {
+                rf.Log("apply no-op: %d\n", i)
+            }
+        }
+        rf.commitIndex = newCommitIndex
+        rf.lastApplied = rf.commitIndex
+        //rf.BroadcastAppend()
     }
 }
 
@@ -530,13 +573,14 @@ func (rf *Raft) Start (command interface{}) (int, int, bool) {
 
     // Your code here (2B).
     replyCh := make(chan CommandReply)
-    commandRequest := CommandRequest{Command: command,
+    commandRequest := CommandRequest{IsNoOp: false,
+                                     Command: command,
                                      ReplyCh: replyCh}
     rf.commandCh <- commandRequest
     reply := <-commandRequest.ReplyCh
 
     //if reply.IsLeader {
-        rf.Log("reply Command: {%d, %v}, isLeader: %v\n", reply.Index, command, reply.IsLeader)
+    //    rf.Log("reply Command: {%d, %v}, isLeader: %v\n", reply.Index, command, reply.IsLeader)
     //}
     return reply.Index, reply.Term, reply.IsLeader
 }
@@ -768,6 +812,7 @@ func (rf *Raft) AppendCommand (commandRequest CommandRequest) {
 
     command := commandRequest.Command
     newEntry := LogEntry{Term: rf.currentTerm,
+                         IsNoOp: commandRequest.IsNoOp,
                          Command: command}
 
     rf.Log("Command: %v -> %d\n", command, rf.me)
@@ -855,7 +900,16 @@ func (rf *Raft) ActAsLeader () Status {
     rf.heartbeatTimeout = kHeartbeatTimeout
     ticker := time.NewTicker(time.Duration(kTick) * time.Millisecond)
 
-    //rf.BroadcastAppend()
+    // send no-op entry
+    go func () {
+        if rf.commitIndex < rf.LastLogIndex() {
+            replyCh := make(chan CommandReply)
+            commandRequest := CommandRequest{IsNoOp: true,
+                                             ReplyCh: replyCh}
+            rf.commandCh <- commandRequest
+            <-replyCh
+        }
+    }()
 
     nextStatus := rf.status
     for {
@@ -885,40 +939,14 @@ func (rf *Raft) ActAsLeader () Status {
             //index := appendReplyWrapper.Index
             reply := appendReplyWrapper.Reply
             if reply.Success {
-                updated := false
                 if rf.matchIndex[server] < reply.MatchIndex {
-                    updated = true
                     rf.matchIndex[server] = reply.MatchIndex
                 }
                 if rf.nextIndex[server] < reply.MatchIndex + 1 {
                     rf.nextIndex[server] = reply.MatchIndex + 1
                 }
-                if updated {
-                    var matches []int
-                    for i := 0; i < len(rf.peers); i++ {
-                        if i != rf.me {
-                            matches = append(matches, rf.matchIndex[i])
-                        }
-                    }
-                    sort.Ints(matches)
-                    newCommitIndex := matches[len(rf.peers)-(len(rf.peers)/2+1)]
-
-                    if newCommitIndex > rf.commitIndex &&
-                       rf.LogEntry(newCommitIndex).Term == rf.currentTerm { // Figure 8
-                        rf.Log("sorted matches: %v, newCommandIndex:%d\n", matches, newCommitIndex)
-                        rf.persist()
-
-                        for i := rf.commitIndex + 1; i <= newCommitIndex; i++ {
-                            msg := ApplyMsg{CommandValid: true,
-                                            Command: rf.LogEntry(i).Command,
-                                            CommandIndex: i}
-                            rf.Log("apply msg: %d %v\n", msg.CommandIndex, msg.Command)
-                            rf.applyCh <- msg
-                        }
-                        rf.commitIndex = newCommitIndex
-                        rf.lastApplied = rf.commitIndex
-                        //rf.BroadcastAppend()
-                    }
+                if rf.matchIndex[server] > rf.commitIndex {
+                    rf.CheckQuorumThenTryCommitApply()
                 }
             } else {
                 if reply.NextIndexHint > 0 {
@@ -938,13 +966,15 @@ func (rf *Raft) ActAsLeader () Status {
                     rf.me, server, reply.MatchIndex, reply.NextIndexHint, reply.Success)
 
             if reply.Success == true {
-                rf.matchIndex[server] = reply.MatchIndex
-                rf.nextIndex[server] = rf.matchIndex[server] + 1
-
-                if rf.matchIndex[server] < rf.LastLogIndex() {
-                    rf.SendAppend(server)
+                if rf.matchIndex[server] < reply.MatchIndex {
+                    rf.matchIndex[server] = reply.MatchIndex
                 }
-
+                if rf.nextIndex[server] < reply.MatchIndex + 1 {
+                    rf.nextIndex[server] = reply.MatchIndex + 1
+                }
+                if rf.matchIndex[server] > rf.commitIndex {
+                    rf.CheckQuorumThenTryCommitApply()
+                }
             } else {
                 if reply.NextIndexHint > 0 {
                     rf.nextIndex[server] = Min(rf.nextIndex[server],

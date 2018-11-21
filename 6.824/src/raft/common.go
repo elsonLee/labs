@@ -50,6 +50,7 @@ type CommandReply struct {
 
 
 type CommandRequest struct {
+    IsNoOp          bool
     Command         interface{}
     ReplyCh         chan CommandReply
 }
