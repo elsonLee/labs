@@ -975,6 +975,11 @@ func (rf *Raft) ActAsLeader () Status {
                 if rf.matchIndex[server] > rf.commitIndex {
                     rf.CheckQuorumThenTryCommitApply()
                 }
+
+                if rf.matchIndex[server] < rf.LastLogIndex() {
+                    rf.SendAppend(server)
+                }
+
             } else {
                 if reply.NextIndexHint > 0 {
                     rf.nextIndex[server] = Min(rf.nextIndex[server],
