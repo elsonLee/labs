@@ -11,7 +11,7 @@ import (
     "sync/atomic"
 )
 
-const Debug = 1
+const Debug = 0
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
     if Debug > 0 {
@@ -68,7 +68,6 @@ type KVServer struct {
         putAppendCh     chan PutAppendRequest
 }
 
-
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
     // Your code here.
     request := GetRequest{Args: args,
@@ -123,6 +122,10 @@ func (kv *KVServer) UnregisterOpReplyCh (uuid int32) {
         panic("no uuid in map!")
     }
     delete(kv.opReplyMap, uuid)
+    _, ok2 := kv.opReplyMap[uuid]
+    if ok2 {
+        panic("uuid in map not deleted!")
+    }
     kv.opReplyMapMtx.Unlock()
 }
 
@@ -146,7 +149,7 @@ func (kv *KVServer) GetInLoop (request *GetRequest) {
     go func () {
         if isLeader {
             ticker := time.NewTicker(time.Duration(1) * time.Second)
-            DPrintf("server %d wait on chan %v\n", kv.me, opReplyCh)
+            DPrintf("server %d wait on %d chan %v\n", kv.me, uuid, opReplyCh)
             select {
             case opReply := <-opReplyCh:
                 replyCh <- GetReply{WrongLeader: false,
@@ -159,7 +162,7 @@ func (kv *KVServer) GetInLoop (request *GetRequest) {
                 <-opReplyCh    // FIXME
             }
         } else {
-            DPrintf("nserver %d wait on chan %v\n", kv.me, opReplyCh)
+            DPrintf("nserver %d wait on %d chan %v\n", kv.me, uuid, opReplyCh)
             replyCh <- GetReply{WrongLeader: true}
             <-opReplyCh    // FIXME
         }
@@ -268,6 +271,11 @@ func (kv *KVServer) SaveSnapshot () {
 func (kv *KVServer) LoadSnapshot () {
     data := kv.rf.LoadSnapshot()
 
+    if data == nil || len(data) < 1 {   // bootstrap without any state
+        DPrintf("LoadSnapshot nothing!\n")
+        return
+    }
+
     r := bytes.NewBuffer(data)
     d := labgob.NewDecoder(r)
 
@@ -276,6 +284,7 @@ func (kv *KVServer) LoadSnapshot () {
         panic("load Snapshot error!")
     } else {
         kv.db = p.Db
+        DPrintf("LoadSnapshot Get 0 : %v\n", kv.db["0"])
     }
 }
 
@@ -359,8 +368,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
                             case ch <- opReply:
                                 break Loop
                             case <-ticker.C:
-                                DPrintf("Server %d stuck in apply loop on chan %v !!!\n",
-                                        kv.me, ch)
+                                DPrintf("Server %d stuck in apply loop on chan %v, op %v !!!\n",
+                                        kv.me, ch, op)
                             }
                         }
                     }
