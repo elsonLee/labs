@@ -923,15 +923,15 @@ func (rf *Raft) ActAsLeader () Status {
     ticker := time.NewTicker(time.Duration(kTick) * time.Millisecond)
 
     // send no-op entry
-    go func () {
-        if rf.commitIndex < rf.LastLogIndex() {
-            replyCh := make(chan CommandReply)
-            commandRequest := CommandRequest{IsNoOp: true,
-                                             ReplyCh: replyCh}
-            rf.commandCh <- commandRequest
-            <-replyCh
-        }
-    }()
+    //go func () {
+    //    if rf.commitIndex < rf.LastLogIndex() {
+    //        replyCh := make(chan CommandReply)
+    //        commandRequest := CommandRequest{IsNoOp: true,
+    //                                         ReplyCh: replyCh}
+    //        rf.commandCh <- commandRequest
+    //        <-replyCh
+    //    }
+    //}()
 
     nextStatus := rf.status
     for {
@@ -1050,8 +1050,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
     // Your initialization code here (2A, 2B, 2C).
     rf.applyCh = applyCh
-    rf.debugOn.Set(true)
-    //rf.debugOn.Set(false)
+    //rf.debugOn.Set(true)
+    rf.debugOn.Set(false)
     rf.currentTerm = 0
     rf.votedFor = None
     rf.commitIndex = 0
