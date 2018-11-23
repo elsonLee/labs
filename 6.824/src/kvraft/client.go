@@ -79,7 +79,7 @@ func (ck *Clerk) Get(key string) string {
                 }
             }
         } else {
-            ck.Log("Get server %d, network timeout!\n", i)
+            ck.Log("<xx Get server %d, network timeout!\n", i)
         }
         ck.leaderHint = (ck.leaderHint + 1) % len(ck.servers)
 
@@ -130,7 +130,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
                 }
             }
         } else {
-            ck.Log("%d server %d, value:%v, network timeout!\n", op, i, value)
+            ck.Log("<xx %s server %d, value:%v, network timeout!\n", op, i, value)
         }
         ck.leaderHint = (ck.leaderHint + 1) % len(ck.servers)
 
