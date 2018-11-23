@@ -24,11 +24,13 @@ import (
     "sync"
     "bytes"
     "sort"
+    "sync/atomic"
 
     "labrpc"
     "labgob"
 )
 
+var DebugOn bool = false
 
 var kTick int = 100
 var kHeartbeatTimeout int = 200
@@ -131,6 +133,9 @@ type Raft struct {
     commandCh           chan CommandRequest
 
     stateCh             chan chan State
+
+    // for debug
+    uuid                int32
 }
 
 
@@ -164,6 +169,7 @@ func (rf *Raft) PersistentState () []byte {
     e.Encode(rf.currentTerm)
     e.Encode(rf.votedFor)
     e.Encode(rf.log)
+    e.Encode(rf.lastApplied)    // 3.8 to avoid reapplying, lastApplied must be persistent
     //e.Encode(rf.matchIndex)
     data := w.Bytes()
 
@@ -215,17 +221,17 @@ func (rf *Raft) readPersist(data []byte) {
         var currentTerm int
         var votedFor int
         var log []LogEntry
-        //var matchIndex []int
+        var lastApplied int
         if d.Decode(&currentTerm) != nil ||
            d.Decode(&votedFor) != nil ||
-           d.Decode(&log) != nil {
-           //d.Decode(&matchIndex) != nil {
+           d.Decode(&log) != nil ||
+           d.Decode(&lastApplied) != nil {
             panic("read presist error!")
         } else {
             rf.currentTerm = currentTerm
             rf.votedFor = votedFor
             rf.log = log
-            //rf.matchIndex = matchIndex
+            rf.lastApplied = lastApplied
         }
 }
 
@@ -237,11 +243,11 @@ func (rf *Raft) LoadSnapshot () []byte {
     return rf.persister.ReadSnapshot()
 }
 
-func (rf *Raft) LogEntry (index int) LogEntry {
+func (rf *Raft) LogEntry (index int) *LogEntry {
     if index <= 0 || index > rf.LastLogIndex() {
-        panic("LogEntry out of range!")
+        return nil
     }
-    return rf.log[index - 1]
+    return &rf.log[index - 1]
 }
 
 
@@ -290,14 +296,14 @@ func (rf *Raft) TryCommitAndApply (leaderCommited int) {
                 msg := ApplyMsg{CommandValid: true,
                                 Command: entry.Command,
                                 CommandIndex: i}
-                rf.Log("apply msg: %d %v\n", msg.CommandIndex, msg.Command)
-                rf.applyCh <- msg
-                rf.Log("apply msg succ: %d %v\n", msg.CommandIndex, msg.Command)
 
-            } else {
-                rf.Log("apply no-op: %d\n", i)
+                //if rf.lastApplied < i {
+                    rf.Log("apply msg: %d %v\n", msg.CommandIndex, msg.Command)
+                    rf.applyCh <- msg
+                    rf.Log("apply msg succ: %d %v\n", msg.CommandIndex, msg.Command)
+                    rf.lastApplied = i
+                //}
             }
-            rf.lastApplied = rf.commitIndex
         }
     }
 }
@@ -325,31 +331,31 @@ func (rf *Raft) CheckQuorumThenTryCommitApply () {
                 msg := ApplyMsg{CommandValid: true,
                                 Command: rf.LogEntry(i).Command,
                                 CommandIndex: i}
-                rf.Log("apply msg: %d %v\n", msg.CommandIndex, msg.Command)
-                rf.applyCh <- msg
-                rf.Log("apply msg succ: %d %v\n", msg.CommandIndex, msg.Command)
-            } else {
-                rf.Log("apply no-op: %d\n", i)
+                //if rf.lastApplied < i {
+                    rf.Log("apply msg: %d %v\n", msg.CommandIndex, msg.Command)
+                    rf.applyCh <- msg
+                    rf.Log("apply msg succ: %d %v\n", msg.CommandIndex, msg.Command)
+                    rf.lastApplied = i
+                //}
             }
+            rf.commitIndex = i
         }
-        rf.commitIndex = newCommitIndex
-        rf.lastApplied = rf.commitIndex
         //rf.BroadcastAppend()
     }
 }
 
 
-func (rf *Raft) FindConflictIndex (index int, entries []LogEntry) int {
+func (rf *Raft) FindConflictIndex (index int, entries []LogEntry) (int, bool) {
     for i, entry := range entries {
         if index + i <= rf.LastLogIndex() {
             if rf.LogEntry(index + i).Term != entry.Term {
-                return index + i
+                return index + i, true
             }
         } else {
-            return rf.LastLogIndex() + 1
+            return rf.LastLogIndex() + 1, true
         }
     }
-    return 0
+    return 0, false
 }
 
 
@@ -423,6 +429,22 @@ func (rf *Raft) RequestVote (args *RequestVoteArgs, reply *RequestVoteReply) {
 }
 
 
+// TODO: put into Log struct
+func (rf *Raft) MatchLogTerm (index int, term int) bool {
+
+    entry := rf.LogEntry(index)
+    if entry != nil {
+        return entry.Term == term
+    } else {
+        if index == 0 {
+            return true
+        } else {
+            return false
+        }
+    }
+}
+
+
 func (rf *Raft) HandleAppendEntries (appendWrapper AppendEntriesWrapper) Status {
 
     nextStatus := rf.status
@@ -449,25 +471,37 @@ func (rf *Raft) HandleAppendEntries (appendWrapper AppendEntriesWrapper) Status 
 
         //reply.Term = rf.currentTerm
 
-        if args.PrevLogIndex <= 0 {
-            // FIXME
-            if len(rf.log) > 0 {
-                rf.log = rf.log[:0]     //! clear
-            }
-            if len(args.Entries) > 0 {
-                rf.log = append(rf.log, args.Entries...)
-                reply.MatchIndex = rf.LastLogIndex()
-            }
-            reply.Success = true
-        } else if args.PrevLogIndex < rf.commitIndex {  // commited date cannot be overwritten
+        // msg can be reordering, make sure committed data won't be overwritten
+        if args.PrevLogIndex < rf.commitIndex {
             reply.Success = true
         } else {
+
+            // still have problem, think L0 recv succ reply from L1, L2, ready to commit, then L1 recv
+            // a previous AE from L0, can overwrite data ready to commit, must avoid this issue by
+            // conflict detection
 
             if rf.LastLogIndex() < args.PrevLogIndex {
                 reply.NextIndexHint = rf.LastLogIndex() + 1
                 reply.Success = false
             } else {
-                if rf.LogEntry(args.PrevLogIndex).Term != args.PrevLogTerm {
+                // new data also included in conflict branch
+                if rf.MatchLogTerm(args.PrevLogIndex, args.PrevLogTerm) {
+                    conflictIndex, conflict := rf.FindConflictIndex(args.PrevLogIndex + 1, args.Entries)
+                    if conflict {
+                        if conflictIndex > 0 {
+                            rf.log = rf.log[0:conflictIndex - 1]
+                            rf.log = append(rf.log, args.Entries[conflictIndex - (args.PrevLogIndex + 1):]...)
+                            reply.MatchIndex = rf.LastLogIndex()
+                        } else {
+                            panic("conflictIndex <= 0")
+                        }
+                    } else {
+                        // no conflict, maybe recv delayed AEresp
+                        reply.MatchIndex = args.PrevLogIndex + len(args.Entries)
+                    }
+                    reply.Success = true
+
+                } else {
                     for i := args.PrevLogIndex; i >= Max(1, rf.commitIndex); i-- {
                         if rf.LogEntry(i).Term == rf.LogEntry(args.PrevLogIndex).Term {
                             reply.NextIndexHint = i + 1
@@ -477,19 +511,7 @@ func (rf *Raft) HandleAppendEntries (appendWrapper AppendEntriesWrapper) Status 
                     }
                     rf.log = rf.log[0:args.PrevLogIndex-1]
                     reply.Success = false
-                } else {
 
-                    conflictIndex := rf.FindConflictIndex(args.PrevLogIndex + 1, args.Entries)
-                    if conflictIndex > 0 {
-                        rf.log = rf.log[0:conflictIndex - 1]
-                        rf.log = append(rf.log, args.Entries[conflictIndex - (args.PrevLogIndex + 1):]...)
-                        reply.MatchIndex = rf.LastLogIndex()
-                    } else if conflictIndex == 0 {
-                        reply.MatchIndex = args.PrevLogIndex + len(args.Entries)
-                    } else {
-                        panic("conflictIndex < 0")
-                    }
-                    reply.Success = true
                 }
             }
         }
@@ -500,8 +522,9 @@ func (rf *Raft) HandleAppendEntries (appendWrapper AppendEntriesWrapper) Status 
 
     rf.persist()
 
-    rf.Log("%sresp %d => %d {matchIndex:%d, nextHint:%d, term:%d -> %d, voteFor:%v -> %v, succ:%v}, %v -> %v\n",
+    rf.Log("%sresp{%d} %d => %d {matchIndex:%d, nextHint:%d, term:%d -> %d, voteFor:%v -> %v, succ:%v}, %v -> %v\n",
             args.Type,
+            args.Uuid,
             rf.me,
             args.LeaderId,
             reply.MatchIndex,
@@ -598,8 +621,6 @@ func (rf *Raft) Start (command interface{}) (int, int, bool) {
 
     rf.commandCh <- commandRequest
     reply := <-commandRequest.ReplyCh
-
-    rf.Log("Reply: %v\n", commandRequest.Command)
 
     //if reply.IsLeader {
     //    rf.Log("reply Command: {%d, %v}, isLeader: %v\n", reply.Index, command, reply.IsLeader)
@@ -758,7 +779,7 @@ func (rf *Raft) ActAsCandidate () Status {
 
 
 // new entry must be saved in log first
-func (rf Raft) PrepareAppendEntries (msgType MsgType, index int, len int) *AppendEntriesArgs {
+func (rf *Raft) PrepareAppendEntries (msgType MsgType, index int, len int) *AppendEntriesArgs {
 
     // FIXME
     prevLogIndex := index-1
@@ -767,7 +788,10 @@ func (rf Raft) PrepareAppendEntries (msgType MsgType, index int, len int) *Appen
         prevLogTerm = rf.LogEntry(prevLogIndex).Term
     }
 
-    appendRequest := &AppendEntriesArgs{Type: msgType,
+    uuid := atomic.AddInt32(&rf.uuid, 1)
+
+    appendRequest := &AppendEntriesArgs{Uuid: uuid,
+                                        Type: msgType,
                                         Term: rf.currentTerm,
                                         LeaderId: rf.me,
                                         PrevLogIndex: prevLogIndex,
@@ -780,7 +804,11 @@ func (rf Raft) PrepareAppendEntries (msgType MsgType, index int, len int) *Appen
             panic(0)
         }
         newEntry := rf.LogEntry(index + i)
-        appendRequest.Entries = append(appendRequest.Entries, newEntry)
+        if newEntry != nil {
+            appendRequest.Entries = append(appendRequest.Entries, *newEntry)
+        } else {
+            panic("newEntry is nil")
+        }
     }
 
     return appendRequest
@@ -865,8 +893,10 @@ func (rf *Raft) SendAppend (server int) {
 
     request := rf.PrepareAppendEntries(MsgAE, rf.nextIndex[server], size)
 
-    rf.Log("AE %d => %d {prevIndex:%d, commit:%d, entriesLen:%d}\n",
-            rf.me, server, request.PrevLogIndex, request.LeaderCommit, len(request.Entries))
+    rf.Log("AE{%d} %d => %d {prev:%d, prevTerm:%d, commit:%d, entriesLen:%d}\n",
+            request.Uuid, rf.me, server,
+            request.PrevLogIndex, request.PrevLogTerm,
+            request.LeaderCommit, len(request.Entries))
 
     go func () {
         rf.RequestAppend(server, request)
@@ -972,7 +1002,7 @@ func (rf *Raft) ActAsLeader () Status {
                 }
             } else {
                 if reply.NextIndexHint > 0 {
-                    rf.nextIndex[server] = Min(rf.nextIndex[server],
+                    rf.nextIndex[server] = Max(rf.matchIndex[server] + 1,
                                                Max(1, reply.NextIndexHint))
                 } else {
                     rf.nextIndex[server] = rf.matchIndex[server] + 1
@@ -1004,7 +1034,7 @@ func (rf *Raft) ActAsLeader () Status {
 
             } else {
                 if reply.NextIndexHint > 0 {
-                    rf.nextIndex[server] = Min(rf.nextIndex[server],
+                    rf.nextIndex[server] = Max(rf.matchIndex[server] + 1,
                                                Max(1, reply.NextIndexHint))
                 } else {
                     rf.nextIndex[server] = rf.matchIndex[server] + 1
@@ -1050,8 +1080,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
     // Your initialization code here (2A, 2B, 2C).
     rf.applyCh = applyCh
-    //rf.debugOn.Set(true)
-    rf.debugOn.Set(false)
+    rf.debugOn.Set(DebugOn)
     rf.currentTerm = 0
     rf.votedFor = None
     rf.commitIndex = 0
@@ -1066,6 +1095,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
     rf.stateCh = make(chan chan State)
     rf.nextIndex = make([]int, len(peers))
     rf.matchIndex = make([]int, len(peers))
+
+    rf.uuid = 0
 
     nextStatus := Follower
 
@@ -1085,6 +1116,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
     // initialize from state persisted before a crash
     rf.readPersist(persister.ReadRaftState())           // FIXME: not thread-safe
+
+    rf.Log("Restart %d\n", rf.me)
 
     return rf
 }
