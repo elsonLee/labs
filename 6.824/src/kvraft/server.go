@@ -49,6 +49,11 @@ type KVPersistence struct {
     LastApplied map[int64]int64
 }
 
+type OpReplyWrapper struct {
+    IsLeader    bool
+    OpReplyCh   chan OpReply
+}
+
 type KVServer struct {
 	mu      sync.Mutex
 	me      int
@@ -64,7 +69,7 @@ type KVServer struct {
         uuid    int32
 
         opReplyMapMtx   sync.Mutex
-        opReplyMap      map[int32]chan OpReply
+        opReplyMap      map[int32]chan OpReplyWrapper
 
         getCh           chan GetRequest
         putAppendCh     chan PutAppendRequest
@@ -74,24 +79,28 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
     // Your code here.
     request := GetRequest{Args: args,
                           ReplyCh: make(chan GetReply)}
-    kv.getCh <- request
-    resp := <-request.ReplyCh
+    //kv.getCh <- request
+    *reply = kv.GetInLoop(&request)
+
+    //resp := <-request.ReplyCh
 
     //kv.Log("wrongLeader: %v\n", resp.WrongLeader)
 
-    *reply = resp
+    //*reply = resp
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
     // Your code here.
     request := PutAppendRequest{Args: args,
                                 ReplyCh: make(chan PutAppendReply)}
-    kv.putAppendCh <- request
-    resp := <-request.ReplyCh
+    //kv.putAppendCh <- request
+    *reply = kv.PutAppendInLoop(&request)
+
+    //resp := <-request.ReplyCh
 
     //kv.Log("value: %v, wrongLeader: %v\n", args.Value, resp.WrongLeader)
 
-    *reply = resp
+    //*reply = resp
 }
 
 //
@@ -106,27 +115,27 @@ func (kv *KVServer) Kill() {
 }
 
 
-func (kv *KVServer) RegisterOpReplyCh (uuid int32, opReplyCh chan OpReply) {
+func (kv *KVServer) RegisterOpReplyWrapperCh (uuid int32, opReplyWrapperCh chan OpReplyWrapper) {
     kv.opReplyMapMtx.Lock()
     _, ok := kv.opReplyMap[uuid]
     if ok {
         //kv.Log("uuid has registerd: %d\n", uuid)
         panic("already has uuid in map!")
     }
-    kv.Log("reg: %d %v\n", uuid, opReplyCh)
-    kv.opReplyMap[uuid] = opReplyCh
+    kv.Log("reg: %d %v\n", uuid, opReplyWrapperCh)
+    kv.opReplyMap[uuid] = opReplyWrapperCh
     kv.opReplyMapMtx.Unlock()
 }
 
 
-func (kv *KVServer) UnregisterOpReplyCh (uuid int32) {
+func (kv *KVServer) UnregisterOpReplyWrapperCh (uuid int32) {
     kv.opReplyMapMtx.Lock()
-    opReplyCh, ok := kv.opReplyMap[uuid]
-    close(opReplyCh)
+    opReplyWrapperCh, ok := kv.opReplyMap[uuid]
+    close(opReplyWrapperCh)
     if !ok {
         panic("no uuid in map!")
     }
-    kv.Log("unreg: %d %v\n", uuid, opReplyCh)
+    kv.Log("unreg: %d %v\n", uuid, opReplyWrapperCh)
     delete(kv.opReplyMap, uuid)
     _, ok2 := kv.opReplyMap[uuid]
     if ok2 {
@@ -136,7 +145,7 @@ func (kv *KVServer) UnregisterOpReplyCh (uuid int32) {
 }
 
 
-func (kv *KVServer) GetOpReplyCh (uuid int32) (chan OpReply, bool) {
+func (kv *KVServer) GetOpReplyWrapperCh (uuid int32) (chan OpReplyWrapper, bool) {
     kv.opReplyMapMtx.Lock()
     ch, ok := kv.opReplyMap[uuid]
     kv.opReplyMapMtx.Unlock()
@@ -144,11 +153,14 @@ func (kv *KVServer) GetOpReplyCh (uuid int32) (chan OpReply, bool) {
 }
 
 
-func (kv *KVServer) GetInLoop (request *GetRequest) {
+func (kv *KVServer) GetInLoop (request *GetRequest) GetReply {
     args := request.Args
-    replyCh := request.ReplyCh
+    //replyCh := request.ReplyCh
 
     uuid := atomic.AddInt32(&kv.uuid, 1)
+    opReplyWrapperCh := make(chan OpReplyWrapper)
+    kv.RegisterOpReplyWrapperCh(uuid, opReplyWrapperCh)
+    defer kv.UnregisterOpReplyWrapperCh(uuid)
 
     op := Op{ID: args.ID,
              Clerk: args.Clerk,
@@ -158,48 +170,52 @@ func (kv *KVServer) GetInLoop (request *GetRequest) {
 
     index, _, isLeader := kv.rf.Start(op)
 
-    // NOTE: applyMsg logic and GetInLoop should in the same for-loop
+    opReplyCh := make(chan OpReply)
     if isLeader {
-        kv.RegisterOpReplyCh(uuid, make(chan OpReply))
+        opReplyWrapperCh <- OpReplyWrapper{IsLeader: true,
+                                           OpReplyCh: opReplyCh}
+    } else {
+        //opReplyWrapperCh <- OpReplyWrapper{IsLeader: false}
     }
 
-    go func () {
+    kv.Log("GetInLoop Start return %d %v isLeader:%v\n",
+            uuid, opReplyCh, isLeader)
+
+    //go func () {
         replySucc := false
         if isLeader {
             ticker := time.NewTicker(time.Duration(1) * time.Second)
-            opReplyCh, ok := kv.GetOpReplyCh(uuid)
-            if !ok {
-                panic("chan is not registered!")
-            }
             kv.Log("wait on %d chan %v\n", uuid, opReplyCh)
             select {
             case opReply := <-opReplyCh:
-                replyCh <- GetReply{WrongLeader: false,
-                                    Err: opReply.Err,
-                                    Index: index,
-                                    Value: opReply.Value}
+                return GetReply{WrongLeader: false,
+                                Err: opReply.Err,
+                                Index: index,
+                                Value: opReply.Value}
                 replySucc = true
 
             case <-ticker.C:
                 kv.Log("GetInLoop timeout! on chan %v\n", opReplyCh)
-                replyCh <- GetReply{WrongLeader: true}
                 <-opReplyCh    // FIXME: reply may never come here
+                return GetReply{WrongLeader: true}
             }
-            kv.UnregisterOpReplyCh(uuid)
             kv.Log("wait on %d chan %v quit... leader:%v, succ: %v\n",
                     uuid, opReplyCh, isLeader, replySucc)
         } else {
-            replyCh <- GetReply{WrongLeader: true}
+            return GetReply{WrongLeader: true}
         }
-    }()
+    //}()
+    return GetReply{}
 }
 
-
-func (kv *KVServer) PutAppendInLoop (request *PutAppendRequest) {
+func (kv *KVServer) PutAppendInLoop (request *PutAppendRequest) PutAppendReply {
     args := request.Args
-    replyCh := request.ReplyCh
+    //replyCh := request.ReplyCh
 
     uuid := atomic.AddInt32(&kv.uuid, 1)
+    opReplyWrapperCh := make(chan OpReplyWrapper)
+    kv.RegisterOpReplyWrapperCh(uuid, opReplyWrapperCh)
+    defer kv.UnregisterOpReplyWrapperCh(uuid)
 
     op := Op{ID: args.ID,
              Clerk: args.Clerk,
@@ -210,39 +226,41 @@ func (kv *KVServer) PutAppendInLoop (request *PutAppendRequest) {
 
     index, _, isLeader := kv.rf.Start(op)
 
-    // NOTE: applyMsg logic and GetInLoop should in the same for-loop
+    opReplyCh := make(chan OpReply)
     if isLeader {
-        kv.RegisterOpReplyCh(uuid, make(chan OpReply))
+        opReplyWrapperCh <- OpReplyWrapper{IsLeader: true,
+                                           OpReplyCh: opReplyCh}
+    } else {
+        //opReplyWrapperCh <- OpReplyWrapper{IsLeader: false}
     }
 
-    go func () {
+    kv.Log("PutAppendInLoop Start return %d %v isLeader:%v\n",
+            uuid, opReplyCh, isLeader)
+
+    //go func () {
         replySucc := false
         if isLeader {
             ticker := time.NewTicker(time.Duration(1) * time.Second)
-            opReplyCh, ok := kv.GetOpReplyCh(uuid)
-            if !ok {
-                panic("chan is not registered!")
-            }
             kv.Log("wait on %d chan %v\n", uuid, opReplyCh)
             select {
             case opReply := <-opReplyCh:
-                replyCh <- PutAppendReply{WrongLeader: false,
-                                          Err: opReply.Err,
-                                          Index: index}
+                return PutAppendReply{WrongLeader: false,
+                                      Err: opReply.Err,
+                                      Index: index}
                 replySucc = true
 
             case <-ticker.C:
                 kv.Log("PutAppendInLoop timeout! on %d chan %v\n", uuid, opReplyCh)
-                replyCh <- PutAppendReply{WrongLeader: true}
                 <-opReplyCh    // FIXME
+                return PutAppendReply{WrongLeader: true}
             }
-            kv.UnregisterOpReplyCh(uuid)
             kv.Log("wait on %d chan %v quit... leader:%v, succ: %v\n",
                     uuid, opReplyCh, isLeader, replySucc)
         } else {
-            replyCh <- PutAppendReply{WrongLeader: true}
+            return PutAppendReply{WrongLeader: true}
         }
-    }()
+    //}()
+    return PutAppendReply{}
 }
 
 
@@ -323,7 +341,8 @@ func (kv *KVServer) LoadSnapshot () {
     } else {
         kv.db = p.Db
         kv.lastApplied = p.LastApplied
-        kv.Log("LoadSnapshot Get 0 : %v\n", kv.db["0"])
+        kv.Log("LoadSnapshot lastApplied:%v, Get 0 : %v\n",
+                kv.lastApplied, kv.db["0"])
     }
 }
 
@@ -357,7 +376,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
     kv.uuid = 0
     kv.db = make(map[string]string)
     kv.lastApplied = make(map[int64]int64)
-    kv.opReplyMap = make(map[int32]chan OpReply)
+    kv.opReplyMap = make(map[int32]chan OpReplyWrapper)
     kv.applyCh = make(chan raft.ApplyMsg)
 
     kv.rf = raft.Make(servers, me, persister, kv.applyCh)
@@ -367,15 +386,12 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
     go func () {
         for {
-            ticker := time.NewTicker(time.Duration(3) * time.Second)
+            ticker := time.NewTicker(time.Duration(1) * time.Second)
             select {
-            case getRequest := <-kv.getCh:
-                kv.GetInLoop(&getRequest)
-
-            case putAppendRequest := <-kv.putAppendCh:
-                kv.PutAppendInLoop(&putAppendRequest)
 
             case applyMsg := <-kv.applyCh:
+
+                kv.Log("recv apply %v, %v\n", kv.applyCh, applyMsg)
 
                 if op, valid := applyMsg.Command.(Op); valid {
 
@@ -384,18 +400,20 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
                     kv.SaveSnapshot()
 
-                    ch, ok := kv.GetOpReplyCh(uuid)
+                    opReplyWrapperCh, ok := kv.GetOpReplyWrapperCh(uuid)
 
-                    if ok {
-                        kv.Log("uuid %d -> chan %v, dup: %v\n",
-                        uuid, ch, kv.lastApplied[op.Clerk] != op.ID)
-                    }
+                    //if ok {
+                    //    kv.Log("uuid %d -> chan %v, dup: %v\n",
+                    //            uuid, opReplyWrapperCh, kv.lastApplied[op.Clerk] != op.ID)
+                    //}
 
                     // NOTE:
                     // 1. ch should not exist if request is sent to non-leader
                     // 2. op can be duplicated
                     if ok {
-                        //if kv.lastApplied[op.Clerk] != op.ID {
+                        opReplyWrapper := <-opReplyWrapperCh
+                        if opReplyWrapper.IsLeader {
+                            ch := opReplyWrapper.OpReplyCh
                             Loop:
                             for {
                                 ticker := time.NewTicker(time.Duration(1) * time.Second)
@@ -409,7 +427,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
                                             uuid, ch, op)
                                 }
                             }
-                        //}
+                        }
                     }
 
                     // TODO
@@ -424,47 +442,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
             }
         }
     }()
-
-    //go func () {
-    //    for {
-    //        select {
-    //        case applyMsg := <-kv.applyCh:
-
-    //            if op, valid := applyMsg.Command.(Op); valid {
-
-    //                opReply := kv.ApplyOp(op)
-    //                uuid := op.Uuid
-
-    //                kv.SaveSnapshot()
-
-    //                ch, ok := kv.GetOpReplyCh(uuid)
-
-    //                // NOTE:
-    //                // 1. ch should not exist if request is sent to non-leader
-    //                // 2. op can be duplicated
-
-    //                if ok && kv.lastApplied[op.Clerk] != op.ID {
-    //                    Loop:
-    //                    for {
-    //                        ticker := time.NewTicker(time.Duration(1) * time.Second)
-    //                        kv.Log("send to %d chan %v\n", uuid, ch)
-    //                        select {
-    //                        case ch <- opReply:
-    //                            kv.Log("send to %d chan %v succ\n", uuid, ch)
-    //                            break Loop
-    //                        case <-ticker.C:
-    //                            kv.Log("stuck in apply loop on uuid %d chan %v, op %v !!!\n",
-    //                                    uuid, ch, op)
-    //                        }
-    //                    }
-    //                }
-
-    //            } else {
-    //                panic("invalid applyMsg!")
-    //            }
-    //        }
-    //    }
-    //}()
 
     return kv
 }
