@@ -46,6 +46,7 @@ type OpReply struct {
 
 type KVPersistence struct {
     Db          map[string]string
+    LastApplied map[int64]int64
 }
 
 type KVServer struct {
@@ -76,7 +77,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
     kv.getCh <- request
     resp := <-request.ReplyCh
 
-    kv.Log("wrongLeader: %v\n", reply.WrongLeader)
+    //kv.Log("wrongLeader: %v\n", resp.WrongLeader)
 
     *reply = resp
 }
@@ -88,7 +89,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
     kv.putAppendCh <- request
     resp := <-request.ReplyCh
 
-    kv.Log("value: %v, wrongLeader: %v\n", args.Value, reply.WrongLeader)
+    //kv.Log("value: %v, wrongLeader: %v\n", args.Value, resp.WrongLeader)
 
     *reply = resp
 }
@@ -182,7 +183,7 @@ func (kv *KVServer) GetInLoop (request *GetRequest) {
             case <-ticker.C:
                 kv.Log("GetInLoop timeout! on chan %v\n", opReplyCh)
                 replyCh <- GetReply{WrongLeader: true}
-                <-opReplyCh    // FIXME
+                <-opReplyCh    // FIXME: reply may never come here
             }
             kv.UnregisterOpReplyCh(uuid)
             kv.Log("wait on %d chan %v quit... leader:%v, succ: %v\n",
@@ -296,7 +297,8 @@ func (kv *KVServer) SaveSnapshot () {
     w := new(bytes.Buffer)
     e := labgob.NewEncoder(w)
 
-    obj := KVPersistence{Db: kv.db}
+    obj := KVPersistence{Db: kv.db,
+                         LastApplied: kv.lastApplied}
     e.Encode(obj)
 
     data := w.Bytes()
@@ -320,6 +322,7 @@ func (kv *KVServer) LoadSnapshot () {
         panic("load Snapshot error!")
     } else {
         kv.db = p.Db
+        kv.lastApplied = p.LastApplied
         kv.Log("LoadSnapshot Get 0 : %v\n", kv.db["0"])
     }
 }
@@ -383,23 +386,30 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
                     ch, ok := kv.GetOpReplyCh(uuid)
 
+                    if ok {
+                        kv.Log("uuid %d -> chan %v, dup: %v\n",
+                        uuid, ch, kv.lastApplied[op.Clerk] != op.ID)
+                    }
+
                     // NOTE:
                     // 1. ch should not exist if request is sent to non-leader
                     // 2. op can be duplicated
-                    if ok && kv.lastApplied[op.Clerk] != op.ID {
-                        Loop:
-                        for {
-                            ticker := time.NewTicker(time.Duration(1) * time.Second)
-                            kv.Log("send to %d chan %v\n", uuid, ch)
-                            select {
-                            case ch <- opReply:
-                                kv.Log("send to %d chan %v succ\n", uuid, ch)
-                                break Loop
-                            case <-ticker.C:
-                                kv.Log("stuck in apply loop on uuid %d chan %v, op %v !!!\n",
-                                        uuid, ch, op)
+                    if ok {
+                        //if kv.lastApplied[op.Clerk] != op.ID {
+                            Loop:
+                            for {
+                                ticker := time.NewTicker(time.Duration(1) * time.Second)
+                                kv.Log("send to %d chan %v\n", uuid, ch)
+                                select {
+                                case ch <- opReply:
+                                    kv.Log("send to %d chan %v succ\n", uuid, ch)
+                                    break Loop
+                                case <-ticker.C:
+                                    kv.Log("stuck in apply loop on uuid %d chan %v, op %v !!!\n",
+                                            uuid, ch, op)
+                                }
                             }
-                        }
+                        //}
                     }
 
                     // TODO
