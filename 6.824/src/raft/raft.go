@@ -30,7 +30,7 @@ import (
     "labgob"
 )
 
-var DebugOn bool = false
+var DebugOn bool = true
 
 var kTick int = 100
 var kHeartbeatTimeout int = 200
@@ -297,12 +297,12 @@ func (rf *Raft) TryCommitAndApply (leaderCommited int) {
                                 Command: entry.Command,
                                 CommandIndex: i}
 
-                //if rf.lastApplied < i {
+                if rf.lastApplied < i {
                     rf.Log("apply msg: %d %v\n", msg.CommandIndex, msg.Command)
                     rf.applyCh <- msg
                     rf.Log("apply msg succ: %d %v\n", msg.CommandIndex, msg.Command)
                     rf.lastApplied = i
-                //}
+                }
             }
         }
     }
@@ -331,12 +331,14 @@ func (rf *Raft) CheckQuorumThenTryCommitApply () {
                 msg := ApplyMsg{CommandValid: true,
                                 Command: rf.LogEntry(i).Command,
                                 CommandIndex: i}
-                //if rf.lastApplied < i {
-                    rf.Log("apply msg: %d %v\n", msg.CommandIndex, msg.Command)
+                if rf.lastApplied < i {
+                    rf.Log("apply msg %v: %d %v\n",
+                            rf.applyCh, msg.CommandIndex, msg.Command)
                     rf.applyCh <- msg
-                    rf.Log("apply msg succ: %d %v\n", msg.CommandIndex, msg.Command)
+                    rf.Log("apply msg %v succ: %d %v\n",
+                            rf.applyCh, msg.CommandIndex, msg.Command)
                     rf.lastApplied = i
-                //}
+                }
             }
             rf.commitIndex = i
         }

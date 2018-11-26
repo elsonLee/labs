@@ -80,6 +80,7 @@ type RequestVoteWrapper struct {
 
 // AppendEntries
 type AppendEntriesArgs struct {
+    Uuid            int32
     Type            MsgType
     Term            int
     LeaderId        int
