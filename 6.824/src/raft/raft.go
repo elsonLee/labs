@@ -290,11 +290,19 @@ func (rf *Raft) TryApplyMsg () {
         for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
             entry := rf.LogEntry(i)
             if !entry.IsNoOp {
-                // TODO: add timeout handling
                 msg := ApplyMsg{CommandValid: true,
                                 Command: entry.Command,
                                 CommandIndex: i}
-                rf.applyCh <- msg
+
+                // add timeout, avoid blocking here
+                ticker := time.NewTicker(time.Duration(5) * time.Millisecond)
+                rf.Log("apply msg: %d, {%v}\n", i, msg)
+                select {
+                case rf.applyCh <- msg:
+                case <-ticker.C:
+                    fmt.Printf("apply msg timeout!\n")
+                    return
+                }
             }
             rf.lastApplied = i
         }
@@ -1041,6 +1049,7 @@ func (rf *Raft) ActAsLeader () Status {
             rf.heartbeatTimeout -= kTick
             if rf.heartbeatTimeout <= 0 {
                 rf.heartbeatTimeout = kHeartbeatTimeout
+                rf.TryApplyMsg()
                 rf.BroadcastHeartbeat()
             }
         }
