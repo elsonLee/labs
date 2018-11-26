@@ -30,7 +30,7 @@ import (
     "labgob"
 )
 
-var DebugOn bool = true
+var DebugOn bool = false
 
 var kTick int = 100
 var kHeartbeatTimeout int = 200
@@ -284,27 +284,29 @@ func (rf *Raft) IsUptodate (args *RequestVoteArgs) bool {
 }
 
 
-func (rf *Raft) TryCommitAndApply (leaderCommited int) {
+func (rf *Raft) TryApplyMsg () {
 
-    oldCommitIndex := rf.commitIndex
-    if leaderCommited > rf.commitIndex {
-        rf.commitIndex = Min(leaderCommited, rf.LastLogIndex())
-        for i := oldCommitIndex + 1; i <= rf.commitIndex; i++ {
+    if rf.lastApplied < rf.commitIndex {
+        for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
             entry := rf.LogEntry(i)
             if !entry.IsNoOp {
-
+                // TODO: add timeout handling
                 msg := ApplyMsg{CommandValid: true,
                                 Command: entry.Command,
                                 CommandIndex: i}
-
-                if rf.lastApplied < i {
-                    rf.Log("apply msg: %d %v\n", msg.CommandIndex, msg.Command)
-                    rf.applyCh <- msg
-                    rf.Log("apply msg succ: %d %v\n", msg.CommandIndex, msg.Command)
-                    rf.lastApplied = i
-                }
+                rf.applyCh <- msg
             }
+            rf.lastApplied = i
         }
+    }
+}
+
+
+func (rf *Raft) TryCommitAndApply (leaderCommited int) {
+
+    if leaderCommited > rf.commitIndex {
+        rf.commitIndex = Min(leaderCommited, rf.LastLogIndex())
+        rf.TryApplyMsg()
     }
 }
 
@@ -322,27 +324,12 @@ func (rf *Raft) CheckQuorumThenTryCommitApply () {
 
     if newCommitIndex > rf.commitIndex &&
        rf.LogEntry(newCommitIndex).Term == rf.currentTerm { // Figure 8
+
         rf.Log("sorted matches: %v, newCommandIndex:%d\n", matches, newCommitIndex)
         rf.persist()
 
-        for i := rf.commitIndex + 1; i <= newCommitIndex; i++ {
-            entry := rf.LogEntry(i)
-            if !entry.IsNoOp {
-                msg := ApplyMsg{CommandValid: true,
-                                Command: rf.LogEntry(i).Command,
-                                CommandIndex: i}
-                if rf.lastApplied < i {
-                    rf.Log("apply msg %v: %d %v\n",
-                            rf.applyCh, msg.CommandIndex, msg.Command)
-                    rf.applyCh <- msg
-                    rf.Log("apply msg %v succ: %d %v\n",
-                            rf.applyCh, msg.CommandIndex, msg.Command)
-                    rf.lastApplied = i
-                }
-            }
-            rf.commitIndex = i
-        }
-        //rf.BroadcastAppend()
+        rf.commitIndex = newCommitIndex
+        rf.TryApplyMsg()
     }
 }
 
