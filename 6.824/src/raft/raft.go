@@ -300,7 +300,7 @@ func (rf *Raft) TryApplyMsg () {
                 select {
                 case rf.applyCh <- msg:
                 case <-ticker.C:
-                    fmt.Printf("apply msg timeout!\n")
+                    rf.Log("apply msg timeout!\n")
                     return
                 }
             }
