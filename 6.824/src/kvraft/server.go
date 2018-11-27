@@ -11,7 +11,7 @@ import (
     "sync/atomic"
 )
 
-const Debug = true
+const Debug = false
 
 func (kv *KVServer) Log (format string, a ...interface{}) (n int, err error) {
     if Debug {
@@ -407,8 +407,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
             case applyMsg := <-kv.applyCh:
 
-                kv.Log("recv apply %v, %v\n", kv.applyCh, applyMsg)
-
                 if op, valid := applyMsg.Command.(Op); valid {
 
                     opReply := kv.ApplyOp(op)
@@ -417,11 +415,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
                     kv.SaveSnapshot()
 
                     opReplyWrapperCh, ok := kv.GetOpReplyWrapperCh(uuid)
-
-                    //if ok {
-                    //    kv.Log("uuid %d -> chan %v, dup: %v\n",
-                    //            uuid, opReplyWrapperCh, kv.lastApplied[op.Clerk] != op.ID)
-                    //}
 
                     // NOTE:
                     // 1. ch should not exist if request is sent to non-leader
