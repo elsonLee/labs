@@ -286,16 +286,13 @@ func (kv *KVServer) ApplyOp (op Op) OpReply {
 
     // duplicated request
     // TODO: add Session for client
-    if kv.lastApplied[clerk] == id {
-        kv.Log("skip duplicated operation: %v\n", op)
-        if op.Type != C_Get {
+    if op.Type != C_Get {
+    	if kv.lastApplied[clerk] == id {
+        	kv.Log("skip duplicated operation: %v\n", op)
             return OpReply{Err: OK,
                            Value: kv.db[op.Key]}
-        }
+    	}
     }
-    //else {
-    //    kv.lastApplied[clerk] = id
-    //}
 
     switch op.Type {
     case C_Put:
@@ -440,7 +437,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
                     }
 
                     // TODO
-                    kv.lastApplied[op.Clerk] = op.ID
+					if op.Type != C_Get {
+                    	kv.lastApplied[op.Clerk] = op.ID
+					}
 
                 } else {
                     panic("invalid applyMsg!")
