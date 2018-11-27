@@ -77,6 +77,44 @@ type State struct {
     IsLeader    bool
 }
 
+type Logger struct {
+	
+	StartLogIndex	int
+	
+	Log				[]LogEntry
+}
+
+func (l *Logger) LastLogIndex () int {
+	return l.StartLogIndex + len(l.Log)	
+}
+
+func (l *Logger) LastLogTerm () int {
+	lastLogIndex := l.LastLogIndex()
+	entry := l.LogEntry(lastLogIndex)
+	if entry != nil {
+		return entry.Term
+	} else {
+		return 0	
+	}
+}
+
+func (l *Logger) LogEntry (index int) *LogEntry {
+	if index <= l.StartLogIndex || index > l.LastLogIndex() {
+		return nil	
+	}
+	return &l.Log[index - l.StartLogIndex - 1]
+}
+
+// delete data after index, include the index
+func (l *Logger) DropAfterIndex (index int) {
+	l.Log = l.Log[0:index - l.StartLogIndex - 1]	
+}
+
+func (l *Logger) Append (entries ...LogEntry) {
+	l.Log = append(l.Log, entries...)	
+}
+
+
 //
 // A Go object implementing a single Raft peer.
 //
@@ -109,7 +147,7 @@ type Raft struct {
 
     votedFor            int
 
-    log                 []LogEntry
+    log                 Logger
 
     // Volatile state on all servers
     commitIndex         int
@@ -143,7 +181,7 @@ func (rf *Raft) Log (format string, a ...interface{}) {
     if rf.debugOn.Get() {
         fmt.Printf("%d ms [%s%d:t%d:i%d:t%d] %s",
             timeStampInMs(), AbbrStatusName(rf.status), rf.me, rf.currentTerm,
-            rf.LastLogIndex(), rf.LastLogTerm(),
+            rf.log.LastLogIndex(), rf.log.LastLogTerm(),
             fmt.Sprintf(format, a...))
     }
 }
@@ -170,7 +208,6 @@ func (rf *Raft) PersistentState () []byte {
     e.Encode(rf.votedFor)
     e.Encode(rf.log)
     e.Encode(rf.lastApplied)    // 3.8 to avoid reapplying, lastApplied must be persistent
-    //e.Encode(rf.matchIndex)
     data := w.Bytes()
 
     return data
@@ -220,7 +257,7 @@ func (rf *Raft) readPersist(data []byte) {
         d := labgob.NewDecoder(r)
         var currentTerm int
         var votedFor int
-        var log []LogEntry
+        var log Logger
         var lastApplied int
         if d.Decode(&currentTerm) != nil ||
            d.Decode(&votedFor) != nil ||
@@ -243,32 +280,9 @@ func (rf *Raft) LoadSnapshot () []byte {
     return rf.persister.ReadSnapshot()
 }
 
-func (rf *Raft) LogEntry (index int) *LogEntry {
-    if index <= 0 || index > rf.LastLogIndex() {
-        return nil
-    }
-    return &rf.log[index - 1]
-}
-
-
-func (rf *Raft) LastLogIndex () int {
-    return len(rf.log)
-}
-
-
-func (rf *Raft) LastLogTerm () int {
-    lastLogIndex := rf.LastLogIndex()
-    if lastLogIndex >= 1 {
-        return rf.LogEntry(lastLogIndex).Term
-    } else {
-        return 0
-    }
-}
-
-
 func (rf *Raft) IsUptodate (args *RequestVoteArgs) bool {
-    lastLogIndex := rf.LastLogIndex()
-    lastLogTerm := rf.LastLogTerm()
+    lastLogIndex := rf.log.LastLogIndex()
+    lastLogTerm := rf.log.LastLogTerm()
 
     if args.LastLogTerm > lastLogTerm {
         return true
@@ -288,7 +302,7 @@ func (rf *Raft) TryApplyMsg () {
 
     if rf.lastApplied < rf.commitIndex {
         for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
-            entry := rf.LogEntry(i)
+            entry := rf.log.LogEntry(i)
             if !entry.IsNoOp {
                 msg := ApplyMsg{CommandValid: true,
                                 Command: entry.Command,
@@ -313,7 +327,7 @@ func (rf *Raft) TryApplyMsg () {
 func (rf *Raft) TryCommitAndApply (leaderCommited int) {
 
     if leaderCommited > rf.commitIndex {
-        rf.commitIndex = Min(leaderCommited, rf.LastLogIndex())
+        rf.commitIndex = Min(leaderCommited, rf.log.LastLogIndex())
         rf.TryApplyMsg()
     }
 }
@@ -331,7 +345,7 @@ func (rf *Raft) CheckQuorumThenTryCommitApply () {
     newCommitIndex := matches[len(rf.peers)-(len(rf.peers)/2+1)]
 
     if newCommitIndex > rf.commitIndex &&
-       rf.LogEntry(newCommitIndex).Term == rf.currentTerm { // Figure 8
+       rf.log.LogEntry(newCommitIndex).Term == rf.currentTerm { // Figure 8
 
         rf.Log("sorted matches: %v, newCommandIndex:%d\n", matches, newCommitIndex)
         rf.persist()
@@ -344,12 +358,12 @@ func (rf *Raft) CheckQuorumThenTryCommitApply () {
 
 func (rf *Raft) FindConflictIndex (index int, entries []LogEntry) (int, bool) {
     for i, entry := range entries {
-        if index + i <= rf.LastLogIndex() {
-            if rf.LogEntry(index + i).Term != entry.Term {
+        if index + i <= rf.log.LastLogIndex() {
+            if rf.log.LogEntry(index + i).Term != entry.Term {
                 return index + i, true
             }
         } else {
-            return rf.LastLogIndex() + 1, true
+            return rf.log.LastLogIndex() + 1, true
         }
     }
     return 0, false
@@ -429,7 +443,7 @@ func (rf *Raft) RequestVote (args *RequestVoteArgs, reply *RequestVoteReply) {
 // TODO: put into Log struct
 func (rf *Raft) MatchLogTerm (index int, term int) bool {
 
-    entry := rf.LogEntry(index)
+    entry := rf.log.LogEntry(index)
     if entry != nil {
         return entry.Term == term
     } else {
@@ -477,8 +491,8 @@ func (rf *Raft) HandleAppendEntries (appendWrapper AppendEntriesWrapper) Status 
             // a previous AE from L0, can overwrite data ready to commit, must avoid this issue by
             // conflict detection
 
-            if rf.LastLogIndex() < args.PrevLogIndex {
-                reply.NextIndexHint = rf.LastLogIndex() + 1
+            if rf.log.LastLogIndex() < args.PrevLogIndex {
+                reply.NextIndexHint = rf.log.LastLogIndex() + 1
                 reply.Success = false
             } else {
                 // new data also included in conflict branch
@@ -486,9 +500,9 @@ func (rf *Raft) HandleAppendEntries (appendWrapper AppendEntriesWrapper) Status 
                     conflictIndex, conflict := rf.FindConflictIndex(args.PrevLogIndex + 1, args.Entries)
                     if conflict {
                         if conflictIndex > 0 {
-                            rf.log = rf.log[0:conflictIndex - 1]
-                            rf.log = append(rf.log, args.Entries[conflictIndex - (args.PrevLogIndex + 1):]...)
-                            reply.MatchIndex = rf.LastLogIndex()
+							rf.log.DropAfterIndex(conflictIndex)
+							rf.log.Append(args.Entries[conflictIndex - (args.PrevLogIndex + 1):]...)
+                            reply.MatchIndex = rf.log.LastLogIndex()
                         } else {
                             panic("conflictIndex <= 0")
                         }
@@ -500,13 +514,13 @@ func (rf *Raft) HandleAppendEntries (appendWrapper AppendEntriesWrapper) Status 
 
                 } else {
                     for i := args.PrevLogIndex; i >= Max(1, rf.commitIndex); i-- {
-                        if rf.LogEntry(i).Term == rf.LogEntry(args.PrevLogIndex).Term {
+                        if rf.log.LogEntry(i).Term == rf.log.LogEntry(args.PrevLogIndex).Term {
                             reply.NextIndexHint = i + 1
                         } else {
                             break
                         }
                     }
-                    rf.log = rf.log[0:args.PrevLogIndex-1]
+					rf.log.DropAfterIndex(args.PrevLogIndex)
                     reply.Success = false
 
                 }
@@ -690,8 +704,8 @@ func (rf *Raft) SendVote (voteReplyCh chan *RequestVoteReply) {
 
     voteRequest := &RequestVoteArgs{Term: rf.currentTerm,
                                     CandidateId: rf.me,
-                                    LastLogIndex: rf.LastLogIndex(),
-                                    LastLogTerm: rf.LastLogTerm()}
+                                    LastLogIndex: rf.log.LastLogIndex(),
+                                    LastLogTerm: rf.log.LastLogTerm()}
     // send request
     for i := 0; i < len(rf.peers); i++ {
         if i != rf.me {
@@ -782,7 +796,7 @@ func (rf *Raft) PrepareAppendEntries (msgType MsgType, index int, len int) *Appe
     prevLogIndex := index-1
     prevLogTerm := 0
     if prevLogIndex >= 1 {
-        prevLogTerm = rf.LogEntry(prevLogIndex).Term
+        prevLogTerm = rf.log.LogEntry(prevLogIndex).Term
     }
 
     uuid := atomic.AddInt32(&rf.uuid, 1)
@@ -795,12 +809,12 @@ func (rf *Raft) PrepareAppendEntries (msgType MsgType, index int, len int) *Appe
                                         PrevLogTerm: prevLogTerm,
                                         LeaderCommit: rf.commitIndex}
     for i := 0; i < len; i++ {
-        if index + i - 1 >= rf.LastLogIndex() {
+        if index + i - 1 >= rf.log.LastLogIndex() {
             rf.Log("index: %d, len: %d, lastLogIndex: %d\n",
-                    index, i, rf.LastLogIndex())
+                    index, i, rf.log.LastLogIndex())
             panic(0)
         }
-        newEntry := rf.LogEntry(index + i)
+        newEntry := rf.log.LogEntry(index + i)
         if newEntry != nil {
             appendRequest.Entries = append(appendRequest.Entries, *newEntry)
         } else {
@@ -864,11 +878,11 @@ func (rf *Raft) AppendCommand (commandRequest CommandRequest) {
 
     rf.Log("Command: %v -> %d\n", command, rf.me)
 
-    rf.log = append(rf.log, newEntry)
+	rf.log.Append(newEntry)
 
     // respond to client
     commandRequest.ReplyCh <- CommandReply{Term: rf.currentTerm,
-                                           Index: rf.LastLogIndex(),
+                                           Index: rf.log.LastLogIndex(),
                                            IsLeader: true}
 
     rf.BroadcastAppend()
@@ -881,10 +895,10 @@ func (rf *Raft) SendAppend (server int) {
         return
     }
 
-    size := rf.LastLogIndex() - rf.nextIndex[server] + 1
+    size := rf.log.LastLogIndex() - rf.nextIndex[server] + 1
     if size < 0 {
         rf.Log("lastLogIndex: %d, nextIndex[%d]: %d\n",
-        rf.LastLogIndex(), server, rf.nextIndex[server])
+        rf.log.LastLogIndex(), server, rf.nextIndex[server])
         panic(0)
     }
 
@@ -943,7 +957,7 @@ func (rf *Raft) ActAsLeader () Status {
 
     for i := 0; i < len(rf.peers); i++ {
         rf.matchIndex[i] = 0
-        rf.nextIndex[i] = rf.LastLogIndex()+1
+        rf.nextIndex[i] = rf.log.LastLogIndex() + 1
     }
 
     rf.heartbeatTimeout = kHeartbeatTimeout
@@ -1025,7 +1039,7 @@ func (rf *Raft) ActAsLeader () Status {
                     rf.CheckQuorumThenTryCommitApply()
                 }
 
-                if rf.matchIndex[server] < rf.LastLogIndex() {
+                if rf.matchIndex[server] < rf.log.LastLogIndex() {
                     rf.SendAppend(server)
                 }
 
@@ -1075,6 +1089,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
     rf.peers = peers
     rf.persister = persister
     rf.me = me
+	rf.log = Logger{StartLogIndex: 0}
 
     // Your initialization code here (2A, 2B, 2C).
     rf.applyCh = applyCh
