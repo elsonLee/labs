@@ -32,9 +32,13 @@ type Op struct {
     // Field names must start with capital letters,
     // otherwise RPC will break.
     ID          int64
+
     Clerk       int64
+
     Type        string
+
     Key         string
+
     Value       string
 }
 
@@ -77,6 +81,7 @@ type KVServer struct {
     opReplyMap      map[int64]chan OpReplyWrapper
 
     getCh           chan GetRequest
+
     putAppendCh     chan PutAppendRequest
 }
 
@@ -325,7 +330,7 @@ func (kv *KVServer) ApplyOp (op Op) OpReply {
     }
 }
 
-func (kv *KVServer) SaveSnapshot () {
+func (kv *KVServer) SaveSnapshot (lastIndex int) {
     w := new(bytes.Buffer)
     e := labgob.NewEncoder(w)
 
@@ -335,27 +340,27 @@ func (kv *KVServer) SaveSnapshot () {
 
     data := w.Bytes()
 
-    kv.rf.SaveSnapshot(data)
+    kv.rf.SaveSnapshot(data, lastIndex)
 }
 
 func (kv *KVServer) LoadSnapshot () {
-    data := kv.rf.LoadSnapshot()
+    if ok, data := kv.rf.LoadSnapshot(); ok {
+        if data == nil || len(data) < 1 {   // bootstrap without any state
+            kv.Log("LoadSnapshot nothing!\n")
+            return
+        }
 
-    if data == nil || len(data) < 1 {   // bootstrap without any state
-        kv.Log("LoadSnapshot nothing!\n")
-        return
-    }
+        r := bytes.NewBuffer(data)
+        d := labgob.NewDecoder(r)
 
-    r := bytes.NewBuffer(data)
-    d := labgob.NewDecoder(r)
-
-    p := KVPersistence{}
-    if d.Decode(&p) != nil {
-        panic("load Snapshot error!")
-    } else {
-        kv.db = p.Db
-        kv.session = p.Session
-        kv.Log("LoadSnapshot\n")
+        p := KVPersistence{}
+        if d.Decode(&p) != nil {
+            panic("load Snapshot error!")
+        } else {
+            kv.db = p.Db
+            kv.session = p.Session
+            kv.Log("LoadSnapshot\n")
+        }
     }
 }
 
@@ -394,7 +399,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
     kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
     // You may need initialization code here.
-    //kv.LoadSnapshot()
+    kv.LoadSnapshot()
 
     go func () {
         for {
@@ -407,8 +412,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
                     opReply := kv.ApplyOp(op)
                     uuid := op.ID
-
-                    //kv.SaveSnapshot()
 
                     opReplyWrapperCh, ok := kv.GetOpReplyWrapperCh(uuid)
 
@@ -439,6 +442,11 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
                     if op.Type != C_Get {
                         kv.session.LastApplied[op.Clerk] = op.ID
                     }
+
+                    //if kv.rf.RaftStateSize() > kv.maxraftstate {
+                    //    lastIndex := applyMsg.CommandIndex
+                    //    kv.SaveSnapshot(lastIndex)
+                    //}
 
                 } else {
                     panic("invalid applyMsg!")

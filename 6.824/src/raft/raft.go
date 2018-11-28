@@ -173,6 +173,8 @@ type Raft struct {
 
     commandCh           chan CommandRequest
 
+    snapshotCmdCh       chan SnapshotCmdRequest
+
     stateCh             chan chan State
 
     // for debug
@@ -201,6 +203,11 @@ func (rf *Raft) GetState () (int, bool) {
         state := <-c
         return state.Term, state.IsLeader
     }
+}
+
+
+func (rf *Raft) StateSize () int {
+    return rf.persister.RaftStateSize()
 }
 
 
@@ -256,13 +263,52 @@ func (rf *Raft) readPersist(data []byte) {
     }
 }
 
-func (rf *Raft) SaveSnapshot (snapshot []byte) {
-    rf.persister.SaveStateAndSnapshot(rf.PersistentState(), snapshot)
+
+func (rf *Raft) SaveSnapshot (snapshot []byte, lastIndex int) bool {
+    replyCh := make(chan SnapshotCmdReply)
+    request := SnapshotCmdRequest{Type: CmdSave,
+                                  LastIndex: lastIndex,
+                                  Snapshot: snapshot,
+                                  ReplyCh: replyCh}
+    rf.snapshotCmdCh <- request
+    reply := <-replyCh
+    return reply.Succ
 }
 
-func (rf *Raft) LoadSnapshot () []byte {
-    return rf.persister.ReadSnapshot()
+
+func (rf *Raft) LoadSnapshot () (bool, []byte) {
+    replyCh := make(chan SnapshotCmdReply)
+    request := SnapshotCmdRequest{Type: CmdLoad,
+                                  ReplyCh: replyCh}
+    rf.snapshotCmdCh <- request
+    reply := <-replyCh
+    return reply.Succ, reply.Snapshot
 }
+
+
+func (rf *Raft) HandleSnapshotCmd (request *SnapshotCmdRequest) {
+    switch request.Type {
+    case CmdSave:
+        snapshot := request.Snapshot
+        lastIndex := request.LastIndex
+        replyCh := request.ReplyCh
+
+        rf.persister.SaveStateAndSnapshot(rf.PersistentState(), snapshot)
+
+        rf.lastSnapshotIndex = lastIndex
+        replyCh <- SnapshotCmdReply{Succ: true}
+
+    case CmdLoad:
+        replyCh := request.ReplyCh
+        reply := SnapshotCmdReply{Succ: true,
+                                  Snapshot: rf.persister.ReadSnapshot()}
+        replyCh <- reply
+
+    default:
+        rf.Log("not support cmd!\n")
+    }
+}
+
 
 func (rf *Raft) IsUptodate (args *RequestVoteArgs) bool {
     lastLogIndex := rf.log.LastLogIndex()
@@ -658,6 +704,9 @@ func (rf *Raft) ActAsFollower () Status {
             c <- State{Term: rf.currentTerm,
                        IsLeader: false}
 
+        case snapshotCmdRequest := <-rf.snapshotCmdCh:
+            snapshotCmdRequest.ReplyCh <- SnapshotCmdReply{Succ: false}
+
         // ignore
         case <-rf.appendReplyCh:
         case <-rf.heartbeatReplyCh:
@@ -735,6 +784,9 @@ func (rf *Raft) ActAsCandidate () Status {
         case c := <-rf.stateCh:
             c <- State{Term: rf.currentTerm,
                        IsLeader: false}
+
+        case snapshotCmdRequest := <-rf.snapshotCmdCh:
+            snapshotCmdRequest.ReplyCh <- SnapshotCmdReply{Succ: false}
 
         // ignore
         case <-rf.appendReplyCh:
@@ -972,6 +1024,9 @@ func (rf *Raft) ActAsLeader () Status {
             c <- State{Term: rf.currentTerm,
                        IsLeader: true}
 
+        case snapshotCmd := <-rf.snapshotCmdCh:
+            rf.HandleSnapshotCmd(&snapshotCmd)
+
         case voteWrapper := <-rf.voteCh:
             nextStatus = rf.HandleRequestVoteWrapper(voteWrapper)
             if nextStatus != Leader {
@@ -989,7 +1044,6 @@ func (rf *Raft) ActAsLeader () Status {
 
         case appendReplyWrapper := <-rf.appendReplyCh:
             server := appendReplyWrapper.Server
-            //index := appendReplyWrapper.Index
             reply := appendReplyWrapper.Reply
             if reply.Success {
                 if rf.matchIndex[server] < reply.MatchIndex {
@@ -1098,6 +1152,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
     rf.appendReplyCh = make(chan AppendEntriesReplyWrapper)
     rf.heartbeatReplyCh = make(chan AppendEntriesReplyWrapper)
     rf.commandCh = make(chan CommandRequest)
+    rf.snapshotCmdCh = make(chan SnapshotCmdRequest)
     rf.stateCh = make(chan chan State)
     rf.nextIndex = make([]int, len(peers))
     rf.matchIndex = make([]int, len(peers))

@@ -37,9 +37,29 @@ func AbbrStatusName (s Status) string {
 
 type MsgType string
 const (
-    MsgAE   MsgType = "AE"  // appendEntries
-    MsgHB   MsgType = "HB"  // heartbeat
+    MsgAE           MsgType = "AE"  // appendEntries
+    MsgHB           MsgType = "HB"  // heartbeat
+    MsgSaveSnapshot MsgType = "SaveSnapshot"
+    MsgLoadSnapshot MsgType = "LoadSnapshot"
 )
+
+type CmdType string
+const (
+    CmdLoad         CmdType = "Load"
+    CmdSave         CmdType = "Save"
+)
+
+type SnapshotCmdRequest struct {
+    Type            CmdType
+    LastIndex       int
+    Snapshot        []byte
+    ReplyCh         chan SnapshotCmdReply
+}
+
+type SnapshotCmdReply struct {
+    Succ            bool
+    Snapshot        []byte
+}
 
 
 type CommandReply struct {
