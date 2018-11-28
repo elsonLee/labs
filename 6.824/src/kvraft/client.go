@@ -5,6 +5,7 @@ import "labrpc"
 import "crypto/rand"
 import "math/big"
 
+var DebugOn bool = false
 
 type Clerk struct {
     servers     []*labrpc.ClientEnd
@@ -31,7 +32,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 }
 
 func (ck *Clerk) Log (format string, a ...interface{}) {
-    if true {
+    if DebugOn {
         fmt.Printf("[clerk] %s",
                     fmt.Sprintf(format, a...))
     }
