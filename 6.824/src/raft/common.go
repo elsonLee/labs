@@ -49,6 +49,7 @@ const (
     CmdSave         CmdType = "Save"
 )
 
+
 type SnapshotCmdRequest struct {
     Type            CmdType
     LastIndex       int
@@ -56,9 +57,29 @@ type SnapshotCmdRequest struct {
     ReplyCh         chan SnapshotCmdReply
 }
 
+
 type SnapshotCmdReply struct {
     Succ            bool
     Snapshot        []byte
+}
+
+
+type InstallSnapshotArgs struct {
+    Term            int
+    LeaderId        int
+    LastIndex       int
+    LastTerm        int
+    Data            []byte  // only use one RPC request for snapshot
+}
+
+type InstallSnapshotReply struct {
+    Term            int
+}
+
+type InstallSnapshotWrapper struct {
+    Args            *InstallSnapshotArgs
+    Reply           *InstallSnapshotReply
+    Done            chan bool
 }
 
 

@@ -443,7 +443,11 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
                         kv.session.LastApplied[op.Clerk] = op.ID
                     }
 
+                    //if kv.me == 1 {
+                    //    fmt.Printf("[%d]: stateSize: %d\n", kv.me, kv.rf.RaftStateSize())
+                    //}
                     //if kv.rf.RaftStateSize() > kv.maxraftstate {
+                    //if kv.rf.RaftStateSize() > 1000 {
                     //    lastIndex := applyMsg.CommandIndex
                     //    kv.SaveSnapshot(lastIndex)
                     //}
