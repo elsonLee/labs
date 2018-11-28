@@ -78,40 +78,40 @@ type State struct {
 }
 
 type Logger struct {
-	
-	StartLogIndex	int
-	
-	Log				[]LogEntry
+
+    StartLogIndex   int
+
+    Log             []LogEntry
 }
 
 func (l *Logger) LastLogIndex () int {
-	return l.StartLogIndex + len(l.Log)	
+    return l.StartLogIndex + len(l.Log)	
 }
 
 func (l *Logger) LastLogTerm () int {
-	lastLogIndex := l.LastLogIndex()
-	entry := l.LogEntry(lastLogIndex)
-	if entry != nil {
-		return entry.Term
-	} else {
-		return 0	
-	}
+    lastLogIndex := l.LastLogIndex()
+    entry := l.LogEntry(lastLogIndex)
+    if entry != nil {
+        return entry.Term
+    } else {
+        return 0
+    }
 }
 
 func (l *Logger) LogEntry (index int) *LogEntry {
-	if index <= l.StartLogIndex || index > l.LastLogIndex() {
-		return nil	
-	}
-	return &l.Log[index - l.StartLogIndex - 1]
+    if index <= l.StartLogIndex || index > l.LastLogIndex() {
+        return nil
+    }
+    return &l.Log[index - l.StartLogIndex - 1]
 }
 
 // delete data after index, include the index
 func (l *Logger) DropAfterIndex (index int) {
-	l.Log = l.Log[0:index - l.StartLogIndex - 1]	
+    l.Log = l.Log[0:index - l.StartLogIndex - 1]
 }
 
 func (l *Logger) Append (entries ...LogEntry) {
-	l.Log = append(l.Log, entries...)	
+    l.Log = append(l.Log, entries...)
 }
 
 
@@ -159,7 +159,10 @@ type Raft struct {
 
     matchIndex          []int       // indicates data has been replicated to peer, doesn't indicate commited
 
-    // channels
+    // Snapshot related
+    lastSnapshotIndex   int
+
+    // Channels
     voteCh              chan RequestVoteWrapper
 
     appendCh            chan AppendEntriesWrapper
@@ -186,6 +189,7 @@ func (rf *Raft) Log (format string, a ...interface{}) {
     }
 }
 
+
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState () (int, bool) {
@@ -207,7 +211,7 @@ func (rf *Raft) PersistentState () []byte {
     e.Encode(rf.currentTerm)
     e.Encode(rf.votedFor)
     e.Encode(rf.log)
-    e.Encode(rf.lastApplied)    // 3.8 to avoid reapplying, lastApplied must be persistent
+    e.Encode(rf.lastSnapshotIndex)  // 3.8 to avoid reapplying, state machine's last applied index must be persistent
     data := w.Bytes()
 
     return data
@@ -220,16 +224,8 @@ func (rf *Raft) PersistentState () []byte {
 // see paper's Figure 2 for a description of what should be persistent.
 //
 func (rf *Raft) persist() {
-	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
-        data := rf.PersistentState()
-        rf.persister.SaveRaftState(data)
+    data := rf.PersistentState()
+    rf.persister.SaveRaftState(data)
 }
 
 
@@ -237,39 +233,27 @@ func (rf *Raft) persist() {
 // restore previously persisted state.
 //
 func (rf *Raft) readPersist(data []byte) {
-	if data == nil || len(data) < 1 { // bootstrap without any state?
-		return
-	}
-	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
-        r := bytes.NewBuffer(data)
-        d := labgob.NewDecoder(r)
-        var currentTerm int
-        var votedFor int
-        var log Logger
-        var lastApplied int
-        if d.Decode(&currentTerm) != nil ||
-           d.Decode(&votedFor) != nil ||
-           d.Decode(&log) != nil ||
-           d.Decode(&lastApplied) != nil {
-            panic("read presist error!")
-        } else {
-            rf.currentTerm = currentTerm
-            rf.votedFor = votedFor
-            rf.log = log
-            rf.lastApplied = lastApplied
-        }
+    if data == nil || len(data) < 1 { // bootstrap without any state?
+        return
+    }
+
+    r := bytes.NewBuffer(data)
+    d := labgob.NewDecoder(r)
+    var currentTerm int
+    var votedFor int
+    var log Logger
+    var lastSnapshotIndex int
+    if d.Decode(&currentTerm) != nil ||
+    d.Decode(&votedFor) != nil ||
+    d.Decode(&log) != nil ||
+    d.Decode(&lastSnapshotIndex) != nil {
+        panic("read presist error!")
+    } else {
+        rf.currentTerm = currentTerm
+        rf.votedFor = votedFor
+        rf.log = log
+        rf.lastSnapshotIndex = lastSnapshotIndex
+    }
 }
 
 func (rf *Raft) SaveSnapshot (snapshot []byte) {
@@ -300,8 +284,14 @@ func (rf *Raft) IsUptodate (args *RequestVoteArgs) bool {
 
 func (rf *Raft) TryApplyMsg () {
 
-    if rf.lastApplied < rf.commitIndex {
-        for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+    // lastSnapshotIndex is updated by state machine periodically, not as frequent as rf.lastApplied
+    // if server is available, rf.lastApplied is always larger than rf.lastSanpshotIndex, use rf.lastApplied is ok
+    // while server is unavailable, rf.lastApplied is reset, and rf.lastSnapshotIndex shows the state machine's
+    // last saved state, should use rf.lastSnapshotIndex.
+    lastApplied := Max(rf.lastApplied, rf.lastSnapshotIndex)
+
+    if lastApplied < rf.commitIndex {
+        for i := lastApplied + 1; i <= rf.commitIndex; i++ {
             entry := rf.log.LogEntry(i)
             if !entry.IsNoOp {
                 msg := ApplyMsg{CommandValid: true,
@@ -500,8 +490,8 @@ func (rf *Raft) HandleAppendEntries (appendWrapper AppendEntriesWrapper) Status 
                     conflictIndex, conflict := rf.FindConflictIndex(args.PrevLogIndex + 1, args.Entries)
                     if conflict {
                         if conflictIndex > 0 {
-							rf.log.DropAfterIndex(conflictIndex)
-							rf.log.Append(args.Entries[conflictIndex - (args.PrevLogIndex + 1):]...)
+                            rf.log.DropAfterIndex(conflictIndex)
+                            rf.log.Append(args.Entries[conflictIndex - (args.PrevLogIndex + 1):]...)
                             reply.MatchIndex = rf.log.LastLogIndex()
                         } else {
                             panic("conflictIndex <= 0")
@@ -520,7 +510,7 @@ func (rf *Raft) HandleAppendEntries (appendWrapper AppendEntriesWrapper) Status 
                             break
                         }
                     }
-					rf.log.DropAfterIndex(args.PrevLogIndex)
+                    rf.log.DropAfterIndex(args.PrevLogIndex)
                     reply.Success = false
 
                 }
@@ -878,7 +868,7 @@ func (rf *Raft) AppendCommand (commandRequest CommandRequest) {
 
     rf.Log("Command: %v -> %d\n", command, rf.me)
 
-	rf.log.Append(newEntry)
+    rf.log.Append(newEntry)
 
     // respond to client
     commandRequest.ReplyCh <- CommandReply{Term: rf.currentTerm,
@@ -1089,7 +1079,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
     rf.peers = peers
     rf.persister = persister
     rf.me = me
-	rf.log = Logger{StartLogIndex: 0}
+    rf.log = Logger{StartLogIndex: 0}
 
     // Your initialization code here (2A, 2B, 2C).
     rf.applyCh = applyCh
@@ -1100,6 +1090,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
     rf.lastApplied = 0
     rf.status = Follower
     rf.electionTimeout = generateElectionTimeout()
+
+    rf.lastSnapshotIndex = 0
+
     rf.voteCh = make(chan RequestVoteWrapper)
     rf.appendCh = make(chan AppendEntriesWrapper)
     rf.appendReplyCh = make(chan AppendEntriesReplyWrapper)
