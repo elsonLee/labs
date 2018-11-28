@@ -45,7 +45,7 @@ type OpReply struct {
 
 type KVPersistence struct {
     Db          map[string]string
-    LastApplied map[int64]int64
+    Session     Session
 }
 
 type OpReplyWrapper struct {
@@ -53,25 +53,31 @@ type OpReplyWrapper struct {
     OpReplyCh   chan OpReply
 }
 
+type Session struct {
+    LastApplied     map[int64]int64     // clerk -> args.ID
+}
+
 type KVServer struct {
-	mu      sync.Mutex
-	me      int
-	rf      *raft.Raft
-	applyCh chan raft.ApplyMsg
+    mu              sync.Mutex
 
-	maxraftstate int // snapshot if log grows this big
+    me              int
 
-        // Your definitions here.
-        db              map[string]string
-        lastApplied     map[int64]int64     // clerk -> args.ID
+    rf              *raft.Raft
 
-        //uuid            int32
+    applyCh         chan raft.ApplyMsg
 
-        opReplyMapMtx   sync.Mutex
-        opReplyMap      map[int64]chan OpReplyWrapper
+    maxraftstate    int // snapshot if log grows this big
 
-        getCh           chan GetRequest
-        putAppendCh     chan PutAppendRequest
+    // Your definitions here.
+    db              map[string]string
+
+    session         Session
+
+    opReplyMapMtx   sync.Mutex
+    opReplyMap      map[int64]chan OpReplyWrapper
+
+    getCh           chan GetRequest
+    putAppendCh     chan PutAppendRequest
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -282,7 +288,7 @@ func (kv *KVServer) ApplyOp (op Op) OpReply {
     // duplicated request
     // TODO: add Session for client
     if op.Type != C_Get {
-        if kv.lastApplied[clerk] == id {
+        if kv.session.LastApplied[clerk] == id {
             kv.Log("skip duplicated operation: %v\n", op)
             return OpReply{Err: OK,
                            Value: kv.db[op.Key]}
@@ -324,7 +330,7 @@ func (kv *KVServer) SaveSnapshot () {
     e := labgob.NewEncoder(w)
 
     obj := KVPersistence{Db: kv.db,
-                         LastApplied: kv.lastApplied}
+                         Session: kv.session}
     e.Encode(obj)
 
     data := w.Bytes()
@@ -348,9 +354,8 @@ func (kv *KVServer) LoadSnapshot () {
         panic("load Snapshot error!")
     } else {
         kv.db = p.Db
-        kv.lastApplied = p.LastApplied
-        kv.Log("LoadSnapshot lastApplied:%v, Get 0 : %v\n",
-                kv.lastApplied, kv.db["0"])
+        kv.session = p.Session
+        kv.Log("LoadSnapshot\n")
     }
 }
 
@@ -382,7 +387,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
     kv.getCh = make(chan GetRequest)
     kv.putAppendCh = make(chan PutAppendRequest)
     kv.db = make(map[string]string)
-    kv.lastApplied = make(map[int64]int64)
+    kv.session = Session{LastApplied: make(map[int64]int64)}
     kv.opReplyMap = make(map[int64]chan OpReplyWrapper)
     kv.applyCh = make(chan raft.ApplyMsg)
 
@@ -432,7 +437,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
                     // TODO
                     if op.Type != C_Get {
-                        kv.lastApplied[op.Clerk] = op.ID
+                        kv.session.LastApplied[op.Clerk] = op.ID
                     }
 
                 } else {
