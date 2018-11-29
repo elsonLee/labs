@@ -11,7 +11,7 @@ import (
     //"sync/atomic"
 )
 
-const Debug = false
+const Debug = true
 
 func (kv *KVServer) Log (format string, a ...interface{}) (n int, err error) {
     if Debug {
@@ -340,6 +340,9 @@ func (kv *KVServer) SaveSnapshot (lastIndex int) {
 
     data := w.Bytes()
 
+    kv.Log("savesnapshot:%d, size:%d\n",
+            lastIndex, len(data))
+
     kv.rf.SaveSnapshot(data, lastIndex)
 }
 
@@ -443,14 +446,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
                         kv.session.LastApplied[op.Clerk] = op.ID
                     }
 
-                    //if kv.me == 1 {
-                    //    fmt.Printf("[%d]: stateSize: %d\n", kv.me, kv.rf.RaftStateSize())
-                    //}
-                    //if kv.rf.RaftStateSize() > kv.maxraftstate {
-                    //if kv.rf.RaftStateSize() > 1000 {
-                    //    lastIndex := applyMsg.CommandIndex
-                    //    kv.SaveSnapshot(lastIndex)
-                    //}
+                    if kv.rf.RaftStateSize() > 100 {
+                        lastIndex := applyMsg.CommandIndex
+                        kv.SaveSnapshot(lastIndex)
+                    }
 
                 } else {
                     panic("invalid applyMsg!")

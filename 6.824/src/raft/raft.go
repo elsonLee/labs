@@ -30,7 +30,7 @@ import (
     "labgob"
 )
 
-var DebugOn bool = false
+var DebugOn bool = true
 
 var kTick int = 100
 var kHeartbeatTimeout int = 200
@@ -79,13 +79,19 @@ type State struct {
 
 type Logger struct {
 
-    StartLogIndex   int
+    // Snapshot related
+    LastSnapshotIndex   int
 
-    Log             []LogEntry
+    LastSnapshotTerm    int
+
+    // log
+    StartLogIndex       int
+
+    Log                 []LogEntry
 }
 
 func (l *Logger) LastLogIndex () int {
-    return l.StartLogIndex + len(l.Log)	
+    return l.StartLogIndex + len(l.Log)
 }
 
 func (l *Logger) LastLogTerm () int {
@@ -94,7 +100,11 @@ func (l *Logger) LastLogTerm () int {
     if entry != nil {
         return entry.Term
     } else {
-        return 0
+        if lastLogIndex == l.LastSnapshotIndex {
+            return l.LastSnapshotTerm
+        } else {
+            return 0
+        }
     }
 }
 
@@ -181,11 +191,6 @@ type Raft struct {
 
     matchIndex          []int       // indicates data has been replicated to peer, doesn't indicate commited
 
-    // Snapshot related
-    lastSnapshotIndex   int
-
-    lastSnapshotTerm    int
-
     // Channels
     voteCh              chan RequestVoteWrapper
 
@@ -212,9 +217,9 @@ type Raft struct {
 
 func (rf *Raft) Log (format string, a ...interface{}) {
     if rf.debugOn.Get() {
-        fmt.Printf("%d ms [%s%d:t%d:i%d:t%d] %s",
+        fmt.Printf("%d ms [%s%d:t%d:i%d:t%d:s%d] %s",
             timeStampInMs(), AbbrStatusName(rf.status), rf.me, rf.currentTerm,
-            rf.log.LastLogIndex(), rf.log.LastLogTerm(),
+            rf.log.LastLogIndex(), rf.log.LastLogTerm(), rf.log.StartLogIndex,
             fmt.Sprintf(format, a...))
     }
 }
@@ -254,8 +259,8 @@ func (rf *Raft) PersistentState () []byte {
     e := labgob.NewEncoder(w)
     e.Encode(rf.currentTerm)
     e.Encode(rf.votedFor)
-    e.Encode(rf.lastSnapshotIndex)  // 3.8 to avoid reapplying, state machine's last applied index must be persistent
-    e.Encode(rf.lastSnapshotTerm)
+
+    // 3.8 to avoid reapplying, state machine's last applied index must be persistent
     e.Encode(rf.log)
     data := w.Bytes()
 
@@ -288,19 +293,13 @@ func (rf *Raft) readPersist(data []byte) {
     var currentTerm int
     var votedFor int
     var log Logger
-    var lastSnapshotIndex int
-    var lastSnapshotTerm int
     if d.Decode(&currentTerm) != nil ||
     d.Decode(&votedFor) != nil ||
-    d.Decode(&lastSnapshotIndex) != nil ||
-    d.Decode(&lastSnapshotTerm) != nil ||
     d.Decode(&log) != nil {
         panic("read presist error!")
     } else {
         rf.currentTerm = currentTerm
         rf.votedFor = votedFor
-        rf.lastSnapshotIndex = lastSnapshotIndex
-        rf.lastSnapshotTerm = lastSnapshotTerm
         rf.log = log
     }
 }
@@ -329,9 +328,10 @@ func (rf *Raft) LoadSnapshot () (bool, []byte) {
 
 
 func (rf *Raft) CompactLog (lastIndex int) {
+    //rf.Log("CompactLog: startLogIndex:%d, lastIndex:%d\n", rf.log.StartLogIndex, lastIndex)
     entry := rf.log.LogEntry(lastIndex)
-    rf.lastSnapshotIndex = lastIndex
-    rf.lastSnapshotTerm = entry.Term
+    rf.log.LastSnapshotIndex = lastIndex
+    rf.log.LastSnapshotTerm = entry.Term
 
     rf.log.DropBeforeIndex(lastIndex)
 }
@@ -340,15 +340,18 @@ func (rf *Raft) CompactLog (lastIndex int) {
 func (rf *Raft) HandleSnapshotCmd (request *SnapshotCmdRequest) {
     switch request.Type {
     case CmdSave:
-        snapshot := request.Snapshot
         lastIndex := request.LastIndex
         replyCh := request.ReplyCh
+        if request.LastIndex > rf.log.LastSnapshotIndex {
+            snapshot := request.Snapshot
 
-        rf.persister.SaveStateAndSnapshot(rf.PersistentState(), snapshot)
+            rf.CompactLog(lastIndex)
+            rf.persister.SaveStateAndSnapshot(rf.PersistentState(), snapshot)
 
-        rf.CompactLog(lastIndex)
-
-        replyCh <- SnapshotCmdReply{Succ: true}
+            replyCh <- SnapshotCmdReply{Succ: true}
+        } else {
+            replyCh <- SnapshotCmdReply{Succ: false}
+        }
 
     case CmdLoad:
         replyCh := request.ReplyCh
@@ -382,11 +385,11 @@ func (rf *Raft) IsUptodate (args *RequestVoteArgs) bool {
 
 func (rf *Raft) TryApplyMsg () {
 
-    // lastSnapshotIndex is updated by state machine periodically, not as frequent as rf.lastApplied
+    // rf.log.LastSnapshotIndex is updated by state machine periodically, not as frequent as rf.lastApplied
     // if server is available, rf.lastApplied is always larger than rf.lastSanpshotIndex, use rf.lastApplied is ok
-    // while server is unavailable, rf.lastApplied is reset, and rf.lastSnapshotIndex shows the state machine's
-    // last saved state, should use rf.lastSnapshotIndex.
-    lastApplied := Max(rf.lastApplied, rf.lastSnapshotIndex)
+    // while server is unavailable, rf.lastApplied is reset, and rf.log.LastSnapshotIndex shows the state machine's
+    // last saved state, should use rf.log.LastSnapshotIndex.
+    lastApplied := Max(rf.lastApplied, rf.log.LastSnapshotIndex)
 
     if lastApplied < rf.commitIndex {
         for i := lastApplied + 1; i <= rf.commitIndex; i++ {
@@ -537,8 +540,8 @@ func (rf *Raft) MatchLogTerm (index int, term int) bool {
     } else {
         if index == 0 {     // FIXME
             return true
-        } else if index == rf.lastSnapshotIndex &&
-                  term == rf.lastSnapshotTerm {
+        } else if index == rf.log.LastSnapshotIndex &&
+                  term == rf.log.LastSnapshotTerm {
             return true
         } else {
             return false
@@ -669,7 +672,7 @@ func (rf *Raft) HandleInstallSnapshot (snapshotWrapper *InstallSnapshotWrapper) 
              args.Term, args.LastIndex, args.LastTerm, rf.log.StartLogIndex)
 
     if args.Term >= rf.currentTerm {
-        if args.LastIndex > rf.lastSnapshotIndex {
+        if args.LastIndex > rf.log.LastSnapshotIndex {
 
             snapshot := args.Data
 
@@ -680,13 +683,13 @@ func (rf *Raft) HandleInstallSnapshot (snapshotWrapper *InstallSnapshotWrapper) 
                 rf.log.ClearForStartIndex(args.LastIndex)
             }
 
-            rf.lastSnapshotIndex = args.LastIndex
-            rf.lastSnapshotTerm = args.LastTerm
+            rf.log.LastSnapshotIndex = args.LastIndex
+            rf.log.LastSnapshotTerm = args.LastTerm
 
             rf.persister.SaveStateAndSnapshot(rf.PersistentState(), snapshot)
 
-            rf.commitIndex = Max(rf.lastSnapshotIndex, rf.commitIndex)
-            rf.lastApplied = Max(rf.lastSnapshotIndex, rf.lastApplied)
+            rf.commitIndex = Max(rf.log.LastSnapshotIndex, rf.commitIndex)
+            rf.lastApplied = Max(rf.log.LastSnapshotIndex, rf.lastApplied)
         }
     }
 
@@ -813,8 +816,8 @@ func (rf *Raft) ActAsFollower () Status {
             c <- State{Term: rf.currentTerm,
                        IsLeader: false}
 
-        case snapshotCmdRequest := <-rf.snapshotCmdCh:
-            snapshotCmdRequest.ReplyCh <- SnapshotCmdReply{Succ: false}
+        case snapshotCmd := <-rf.snapshotCmdCh:
+            rf.HandleSnapshotCmd(&snapshotCmd)
 
         case <-rf.snapshotReplyCh:
         case snapshotRequest := <-rf.snapshotCh:
@@ -898,8 +901,8 @@ func (rf *Raft) ActAsCandidate () Status {
             c <- State{Term: rf.currentTerm,
                        IsLeader: false}
 
-        case snapshotCmdRequest := <-rf.snapshotCmdCh:
-            snapshotCmdRequest.ReplyCh <- SnapshotCmdReply{Succ: false}
+        case snapshotCmd := <-rf.snapshotCmdCh:
+            rf.HandleSnapshotCmd(&snapshotCmd)
 
         case <-rf.snapshotReplyCh:
         case snapshotRequest := <-rf.snapshotCh:
@@ -954,18 +957,18 @@ func (rf *Raft) PrepareAppendEntries (msgType MsgType, index int, len int) *Appe
     // FIXME
     prevLogIndex := index - 1
     prevLogTerm := 0
-    if prevLogIndex >= 1 {
+    if prevLogIndex > rf.log.LastSnapshotIndex {
         entry := rf.log.LogEntry(prevLogIndex)
         if entry != nil {
             prevLogTerm = entry.Term
         } else {
-            if prevLogIndex == rf.lastSnapshotIndex {
-                prevLogTerm = rf.lastSnapshotTerm
-            } else {
-                // entry is not exist in index, should send InstallSnapshot
-                return nil
-            }
+            return nil
         }
+    } else if prevLogIndex == rf.log.LastSnapshotIndex {
+        prevLogTerm = rf.log.LastSnapshotTerm
+    } else {
+        // entry is not exist in index, should send InstallSnapshot
+        return nil
     }
 
     uuid := atomic.AddInt32(&rf.uuid, 1)
@@ -985,8 +988,8 @@ func (rf *Raft) PrepareAppendEntries (msgType MsgType, index int, len int) *Appe
         if newEntry != nil {
             appendRequest.Entries = append(appendRequest.Entries, *newEntry)
         } else {
-            rf.Log2("index: %d, len: %d, lastLogIndex: %d\n",
-                     index + i, len, rf.log.LastLogIndex())
+            rf.Log("index: %d, len: %d, lastLogIndex: %d, prevLogIndex:%d, lastSnapshotIndex:%d\n",
+                    index + i, len, rf.log.LastLogIndex(), prevLogIndex, rf.log.LastSnapshotIndex)
             panic("newEntry is nil")
         }
     }
@@ -1063,11 +1066,14 @@ func (rf *Raft) SendInstallSnapshot (server int) {
 
     request := &InstallSnapshotArgs{Term: rf.currentTerm,
                                     LeaderId: rf.me,
-                                    LastIndex: rf.lastSnapshotIndex,
-                                    LastTerm: rf.lastSnapshotTerm,
+                                    LastIndex: rf.log.LastSnapshotIndex,
+                                    LastTerm: rf.log.LastSnapshotTerm,
                                     Data: rf.persister.ReadSnapshot()}
-    rf.Log2("InstallSnapshot: lastIndex:%d, lastTerm:%d\n",
-                request.LastIndex, request.LastTerm)
+
+    rf.Log("SS %d => %d {nextIndex:%d, lastIndex:%d, lastTerm:%d, data:%d}\n",
+            rf.me, server, rf.nextIndex[server],
+            request.LastIndex, request.LastTerm,
+            len(request.Data))
 
     go func () {
         rf.RequestInstallSnapshot(server, request)
@@ -1115,8 +1121,9 @@ func (rf *Raft) SendHeartbeat (server int) {
     index := Max(rf.nextIndex[server], rf.log.StartLogIndex + 1)
     request := rf.PrepareAppendEntries(MsgHB, index, 0)
     if request == nil {
-        rf.Log2("startIndex:%d, lastIndex:%d, index:%d, lastSnapshotIndex:%d\n",
-                    rf.log.StartLogIndex, rf.log.LastLogIndex(), index, rf.lastSnapshotIndex)
+        rf.Log("startIndex:%d, lastIndex:%d, index:%d, lastSnapshotIndex:%d\n",
+                rf.log.StartLogIndex, rf.log.LastLogIndex(),
+                index, rf.log.LastSnapshotIndex)
         panic("HB should not return nil request!")
     }
 
@@ -1291,7 +1298,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
     rf.peers = peers
     rf.persister = persister
     rf.me = me
-    rf.log = Logger{StartLogIndex: 0}
+    rf.log = Logger{StartLogIndex: 0,
+                    LastSnapshotIndex: 0,
+                    LastSnapshotTerm: 0}
 
     // Your initialization code here (2A, 2B, 2C).
     rf.applyCh = applyCh
@@ -1302,9 +1311,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
     rf.lastApplied = 0
     rf.status = Follower
     rf.electionTimeout = generateElectionTimeout()
-
-    rf.lastSnapshotIndex = 0
-    rf.lastSnapshotTerm = 0
 
     rf.voteCh = make(chan RequestVoteWrapper)
     rf.appendCh = make(chan AppendEntriesWrapper)
