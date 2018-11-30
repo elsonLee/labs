@@ -30,7 +30,7 @@ import (
     "labgob"
 )
 
-var DebugOn bool = true
+var DebugOn bool = false
 
 var kTick int = 100
 var kHeartbeatTimeout int = 200
@@ -61,6 +61,9 @@ func generateElectionTimeout() int {
 // ApplyMsg, but set CommandValid to false for these other uses.
 //
 type ApplyMsg struct {
+    SnapshotUpdate  bool
+    Snapshot        []byte
+
     CommandValid    bool
     Command         interface{}
     CommandIndex    int
@@ -306,14 +309,17 @@ func (rf *Raft) readPersist(data []byte) {
 
 
 func (rf *Raft) SaveSnapshot (snapshot []byte, lastIndex int) bool {
-    replyCh := make(chan SnapshotCmdReply)
-    request := SnapshotCmdRequest{Type: CmdSave,
-                                  LastIndex: lastIndex,
-                                  Snapshot: snapshot,
-                                  ReplyCh: replyCh}
-    rf.snapshotCmdCh <- request
-    reply := <-replyCh
-    return reply.Succ
+    if lastIndex > rf.log.LastSnapshotIndex {
+        replyCh := make(chan SnapshotCmdReply)
+        request := SnapshotCmdRequest{Type: CmdSave,
+                                      LastIndex: lastIndex,
+                                      Snapshot: snapshot,
+                                      ReplyCh: replyCh}
+        rf.snapshotCmdCh <- request
+        return true
+    } else {
+        return false
+    }
 }
 
 
@@ -341,16 +347,16 @@ func (rf *Raft) HandleSnapshotCmd (request *SnapshotCmdRequest) {
     switch request.Type {
     case CmdSave:
         lastIndex := request.LastIndex
-        replyCh := request.ReplyCh
+        //replyCh := request.ReplyCh
         if request.LastIndex > rf.log.LastSnapshotIndex {
             snapshot := request.Snapshot
 
             rf.CompactLog(lastIndex)
             rf.persister.SaveStateAndSnapshot(rf.PersistentState(), snapshot)
 
-            replyCh <- SnapshotCmdReply{Succ: true}
+            //replyCh <- SnapshotCmdReply{Succ: true}
         } else {
-            replyCh <- SnapshotCmdReply{Succ: false}
+            //replyCh <- SnapshotCmdReply{Succ: false}
         }
 
     case CmdLoad:
@@ -690,10 +696,13 @@ func (rf *Raft) HandleInstallSnapshot (snapshotWrapper *InstallSnapshotWrapper) 
 
             rf.commitIndex = Max(rf.log.LastSnapshotIndex, rf.commitIndex)
             rf.lastApplied = Max(rf.log.LastSnapshotIndex, rf.lastApplied)
+
+            rf.applyCh <- ApplyMsg{SnapshotUpdate: true,
+                                   Snapshot: rf.persister.ReadSnapshot()}
         }
     }
 
-    snapshotWrapper.Done <- true
+    //snapshotWrapper.Done <- true
 }
 
 
@@ -703,7 +712,7 @@ func (rf *Raft) InstallSnapshot (args *InstallSnapshotArgs, reply *InstallSnapsh
                                               Reply: reply,
                                               Done: make(chan bool)}    // TODO: remove Done
     rf.snapshotCh <- snapshotWrapper
-    <-snapshotWrapper.Done
+    //<-snapshotWrapper.Done
 }
 
 
