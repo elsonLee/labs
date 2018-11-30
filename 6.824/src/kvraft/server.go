@@ -11,7 +11,7 @@ import (
     //"sync/atomic"
 )
 
-const Debug = true
+const Debug = false
 
 func (kv *KVServer) Log (format string, a ...interface{}) (n int, err error) {
     if Debug {
@@ -330,6 +330,7 @@ func (kv *KVServer) ApplyOp (op Op) OpReply {
     }
 }
 
+
 func (kv *KVServer) SaveSnapshot (lastIndex int) {
     w := new(bytes.Buffer)
     e := labgob.NewEncoder(w)
@@ -346,24 +347,29 @@ func (kv *KVServer) SaveSnapshot (lastIndex int) {
     kv.rf.SaveSnapshot(data, lastIndex)
 }
 
+func (kv *KVServer) ParseSnapshot (data []byte) {
+
+    if data == nil || len(data) < 1 {
+        kv.Log("ParseSnapshot nothing!\n")
+        return
+    }
+
+    r := bytes.NewBuffer(data)
+    d := labgob.NewDecoder(r)
+
+    p := KVPersistence{}
+    if d.Decode(&p) != nil {
+        panic("parse Snapshot error!")
+    } else {
+        kv.db = p.Db
+        kv.session = p.Session
+        kv.Log("ParseSnapshot\n")
+    }
+}
+
 func (kv *KVServer) LoadSnapshot () {
     if ok, data := kv.rf.LoadSnapshot(); ok {
-        if data == nil || len(data) < 1 {   // bootstrap without any state
-            kv.Log("LoadSnapshot nothing!\n")
-            return
-        }
-
-        r := bytes.NewBuffer(data)
-        d := labgob.NewDecoder(r)
-
-        p := KVPersistence{}
-        if d.Decode(&p) != nil {
-            panic("load Snapshot error!")
-        } else {
-            kv.db = p.Db
-            kv.session = p.Session
-            kv.Log("LoadSnapshot\n")
-        }
+        kv.ParseSnapshot(data)
     }
 }
 
@@ -397,7 +403,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
     kv.db = make(map[string]string)
     kv.session = Session{LastApplied: make(map[int64]int64)}
     kv.opReplyMap = make(map[int64]chan OpReplyWrapper)
-    kv.applyCh = make(chan raft.ApplyMsg)
+    kv.applyCh = make(chan raft.ApplyMsg, 100)  // FIXME
 
     kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
@@ -410,6 +416,11 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
             select {
 
             case applyMsg := <-kv.applyCh:
+
+                if applyMsg.SnapshotUpdate {
+                    kv.ParseSnapshot(applyMsg.Snapshot)
+                    continue
+                }
 
                 if op, valid := applyMsg.Command.(Op); valid {
 
@@ -446,7 +457,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
                         kv.session.LastApplied[op.Clerk] = op.ID
                     }
 
-                    if kv.rf.RaftStateSize() > 100 {
+                    if kv.maxraftstate != -1 && kv.rf.RaftStateSize() > kv.maxraftstate {
                         lastIndex := applyMsg.CommandIndex
                         kv.SaveSnapshot(lastIndex)
                     }
