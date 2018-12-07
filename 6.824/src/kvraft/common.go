@@ -27,7 +27,6 @@ type PutAppendReply struct {
 
 type PutAppendRequest struct {
     Args        *PutAppendArgs
-    ReplyCh     chan PutAppendReply
 }
 
 type GetArgs struct {
@@ -46,5 +45,4 @@ type GetReply struct {
 
 type GetRequest struct {
     Args        *GetArgs
-    ReplyCh     chan GetReply
 }

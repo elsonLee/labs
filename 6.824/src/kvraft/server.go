@@ -87,15 +87,13 @@ type KVServer struct {
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
     // Your code here.
-    request := GetRequest{Args: args,
-                          ReplyCh: make(chan GetReply)}
+    request := GetRequest{Args: args}
     *reply = kv.GetInLoop(&request)
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
     // Your code here.
-    request := PutAppendRequest{Args: args,
-                                ReplyCh: make(chan PutAppendReply)}
+    request := PutAppendRequest{Args: args}
     *reply = kv.PutAppendInLoop(&request)
 }
 
