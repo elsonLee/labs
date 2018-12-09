@@ -23,51 +23,129 @@ const NShards = 10
 // A configuration -- an assignment of shards to groups.
 // Please don't change this.
 type Config struct {
-	Num    int              // config number
-	Shards [NShards]int     // shard -> gid
-	Groups map[int][]string // gid -> servers[]
+    Num         int              // config number
+    Shards      [NShards]int     // shard -> gid
+    Groups      map[int][]string // gid -> servers[]
 }
 
 const (
-	OK = "OK"
+    OK = "OK"
+    NoConfig = "No Config"
 )
 
 type Err string
 
-type JoinArgs struct {
-	Servers map[int][]string // new GID -> servers mappings
+type ReqType string
+const (
+    ReqJoin     ReqType = "join"
+    ReqLeave    ReqType = "leave"
+    ReqMove     ReqType = "move"
+    ReqQuery    ReqType = "query"
+)
+
+type Op struct {
+    Type        ReqType
+    ArgsJoin    JoinArgs
+    ArgsLeave   LeaveArgs
+    ArgsMove    MoveArgs
+    ArgsQuery   QueryArgs
 }
 
-type JoinReply struct {
-	WrongLeader bool
-	Err         Err
+type Info struct {
+    Clerk       int64
+    ID          int64
+}
+
+type JoinArgs struct {
+    Info        Info
+    Servers     map[int][]string // new GID -> servers mappings
 }
 
 type LeaveArgs struct {
-	GIDs []int
-}
-
-type LeaveReply struct {
-	WrongLeader bool
-	Err         Err
+    Info        Info
+    GIDs        []int
 }
 
 type MoveArgs struct {
-	Shard int
-	GID   int
-}
-
-type MoveReply struct {
-	WrongLeader bool
-	Err         Err
+    Info        Info
+    Shard       int
+    GID         int
 }
 
 type QueryArgs struct {
-	Num int // desired config number
+    Info        Info
+    Num         int // desired config number
+}
+
+type OpReply struct {
+    Type        ReqType
+    WrongLeader bool
+    Err         Err
+    Config      Config
+}
+
+type JoinReply struct {
+    WrongLeader bool
+    Err         Err
+}
+
+type LeaveReply struct {
+    WrongLeader bool
+    Err         Err
+}
+
+type MoveReply struct {
+    WrongLeader bool
+    Err         Err
 }
 
 type QueryReply struct {
-	WrongLeader bool
-	Err         Err
-	Config      Config
+    WrongLeader bool
+    Err         Err
+    Config      Config
+}
+
+func (op *Op) GetInfo () Info {
+    switch op.Type {
+    case ReqJoin:
+        return op.ArgsJoin.Info
+    case ReqLeave:
+        return op.ArgsLeave.Info
+    case ReqMove:
+        return op.ArgsMove.Info
+    case ReqQuery:
+        return op.ArgsQuery.Info
+    default:
+        panic(0)
+        return Info{}
+    }
+}
+
+func (jr *JoinReply) Fill (opReply *OpReply) {
+    if opReply.Type == ReqJoin {
+        jr.WrongLeader = opReply.WrongLeader
+        jr.Err = opReply.Err
+    }
+}
+
+func (lr *LeaveReply) Fill (opReply *OpReply) {
+    if opReply.Type == ReqLeave {
+        lr.WrongLeader = opReply.WrongLeader
+        lr.Err = opReply.Err
+    }
+}
+
+func (mr *MoveReply) Fill (opReply *OpReply) {
+    if opReply.Type == ReqMove {
+        mr.WrongLeader = opReply.WrongLeader
+        mr.Err = opReply.Err
+    }
+}
+
+func (qr *QueryReply) Fill (opReply *OpReply) {
+    if opReply.Type == ReqQuery {
+        qr.WrongLeader = opReply.WrongLeader
+        qr.Err = opReply.Err
+        qr.Config = opReply.Config
+    }
 }
