@@ -28,6 +28,20 @@ type Config struct {
     Groups      map[int][]string // gid -> servers[]
 }
 
+func (conf *Config) GetUnusedGid () []int {
+    used_map := map[int]bool{}
+    for _, gid := range conf.Shards {
+        used_map[gid] = true
+    }
+    unused_gids := []int{}
+    for gid, _ := range conf.Groups {
+        if _, ok := used_map[gid]; !ok {
+            unused_gids = append(unused_gids, gid)
+        }
+    }
+    return unused_gids
+}
+
 const (
     OK = "OK"
     NoConfig = "No Config"

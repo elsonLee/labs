@@ -8,7 +8,7 @@ import "labgob"
 import "fmt"
 import "time"
 
-const DebugOn bool = true
+const DebugOn bool = false
 
 func (sm *ShardMaster) Log (format string, a ...interface{}) (n int, err error) {
     if DebugOn {
@@ -178,99 +178,118 @@ func (sm *ShardMaster) HandleRequest (request *Op) OpReply {
     return OpReply{}
 }
 
-func (sm *ShardMaster) FindLongestShard (shards *[NShards]int) (int, int, int) {
-    max_length := 0
-    max_gid := 0
-    max_index := 0
-
-    length := 0
-    index := 0
-    prev := 0
-
-    for i, gid := range shards {
-        if gid == prev {
-            length += 1
-        } else {
-            length = 1
-            index = i
-            prev = gid
-        }
-
-        if length > max_length {
-            max_length = length
-            max_gid = gid
-            max_index = index
-        }
-    }
-
-    if max_index + length == len(shards) {
-        for i, gid := range shards {
-            if i < max_index && gid == prev {
-                length += 1
-            } else {
-                break
-            }
-        }
-    }
-
-    sm.Log("FindMaxShards: index:%d, length:%d\n", max_index, max_length)
-    return max_index, max_gid, max_length
-}
-
-func (sm *ShardMaster) FindPrevShards (shards *[NShards]int, gid int) (bool, int) {
-
-    index := -1
-    for i, val := range shards {
-        if val == gid {
-            index = i
-            for j := (NShards+i-1)%NShards; j != index; j = (NShards+j-1)%NShards {
-                if shards[j] != gid {
-                    return true, j
-                }
-            }
-            return true, -1
-        }
-    }
-    return false, -1
-}
-
 func (sm *ShardMaster) JoinAdjustShards (shards *[NShards]int, gids []int) {
-    sm.Log("before JoinAdjust: %v\n", shards)
-    for _, gid := range gids {
-        max_index, max_gid, max_length := sm.FindLongestShard(shards)
-        if max_gid == 0 {
-            for i := 0; i < NShards; i++ {
-                shards[i] = gid
-            }
-        } else {
-            i := (max_index + max_length/2) % NShards
-            for length := 0; length < max_length/2; length += 1 {
-                shards[i] = gid
-                i = (i+1)%NShards
+    //sm.Log("before JoinAdjust: %v\n", shards)
+
+    gid_map := map[int]int{}
+    for _, gid := range shards {
+        if gid != 0 {
+            if _, ok := gid_map[gid]; ok {
+                gid_map[gid] += 1
+            } else {
+                gid_map[gid] = 1
             }
         }
     }
-    sm.Log("after JoinAdjust: %v\n", shards)
+
+    for _, new_gid := range gids {
+        if _, ok := gid_map[new_gid]; !ok {
+            length := len(gid_map) + 1
+            min := NShards/length
+            max := min
+            if NShards%length > 0 {
+                max += 1
+            }
+            if min > 0 {
+                gid_map[new_gid] = 0
+                for i, gid := range shards {
+                    if _, ok := gid_map[gid]; ok {
+                        if gid_map[gid] > min {
+                            shards[i] = new_gid
+                            gid_map[gid] -= 1
+                            gid_map[new_gid] += 1
+                            if gid_map[new_gid] >= max {
+                                break
+                            }
+                        }
+                    } else {
+                        shards[i] = new_gid
+                        gid_map[new_gid] += 1
+                        if gid_map[new_gid] >= max {
+                            break
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    //sm.Log("after JoinAdjust: %v\n", shards)
 }
 
-func (sm *ShardMaster) LeaveAdjustShards (shards *[NShards]int, gids []int) {
-    sm.Log("before LeaveAdjust: %v\n", shards)
-    for _, gid := range gids {
-        ok, index := sm.FindPrevShards(shards, gid)
-        if ok {
-            if index == -1 {
-                for i := 0; i < NShards; i++ {
-                    shards[i] = 0
-                }
+func (sm *ShardMaster) LeaveAdjustShards (shards *[NShards]int, gids []int, unused_gids []int) {
+    //sm.Log("before LeaveAdjust: %v\n", shards)
+
+    gid_map := map[int]int{}
+    for _, gid := range shards {
+        if gid != 0 {
+            if _, ok := gid_map[gid]; ok {
+                gid_map[gid] += 1
             } else {
-                prevGid := shards[index]
-                for i := (index+1)%NShards; shards[i] != prevGid; i = (i+1)%NShards {
-                    shards[i] = prevGid
-                }
+                gid_map[gid] = 1
             }
         }
     }
-    sm.Log("after LeaveAdjust: %v\n", shards)
+
+    for _, rm_gid := range gids {
+        if _, ok := gid_map[rm_gid]; ok {
+            if len(unused_gids) > 0 {
+                new_gid := unused_gids[0]
+                gid_map[new_gid] = 0
+                for i, _ := range shards {
+                    if shards[i] == rm_gid {
+                        shards[i] = new_gid
+                        gid_map[new_gid] += 1
+                    }
+                }
+                unused_gids = unused_gids[1:]
+            } else {
+                length := len(gid_map) - 1
+                if length > 0 {
+                    min := NShards/length
+                    max := min
+                    if NShards%length > 0 {
+                        max += 1
+                    }
+
+                    var gid_to_add []int
+                    for used_gid, cnt := range gid_map {
+                        if used_gid != rm_gid {
+                            for i := 0; i < max - cnt; i++ {
+                                gid_to_add = append(gid_to_add, used_gid)
+                            }
+                        }
+                    }
+
+                    for i, tgid := range shards {
+                        if tgid == rm_gid {
+                            gid_added := gid_to_add[0]
+                            shards[i] = gid_added
+                            gid_to_add = gid_to_add[1:]
+                            gid_map[gid_added] += 1
+                        }
+                    }
+                } else {
+                    for i := 0; i < NShards; i++ {
+                        shards[i] = 0
+                    }
+                }
+            }
+            delete(gid_map, rm_gid)
+        }
+    }
+
+    //sm.Log("after LeaveAdjust: %v\n", shards)
 }
 
 func (sm *ShardMaster) ApplyJoin (args *JoinArgs) OpReply {
@@ -300,13 +319,27 @@ func (sm *ShardMaster) ApplyLeave (args *LeaveArgs) OpReply {
     config := sm.configs[last].Copy()
     config.Num += 1
 
+    unused_gids := config.GetUnusedGid()
+    leave_map := map[int]bool{}
+    for _, gid := range args.GIDs {
+        leave_map[gid] = true
+    }
+    for i := 0; i < len(unused_gids); {
+        gid := unused_gids[i]
+        if _, ok := leave_map[gid]; ok {
+            unused_gids = append(unused_gids[:i], unused_gids[i+1:]...)
+        } else {
+            i++
+        }
+    }
+
     var gids []int
     for _, gid := range args.GIDs {
         delete(config.Groups, gid)
         gids = append(gids, gid)
     }
 
-    sm.LeaveAdjustShards(&config.Shards, gids)
+    sm.LeaveAdjustShards(&config.Shards, gids, unused_gids)
 
     sm.configs = append(sm.configs, config)
     return OpReply {Type: ReqLeave,
