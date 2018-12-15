@@ -48,7 +48,7 @@ func (config *Config) Copy () Config {
         n.Shards[i] = val
     }
 
-    n.Groups = make(map[int][]string)
+    n.Groups = map[int][]string{}
     for key, value := range config.Groups {
         n.Groups[key] = value
     }

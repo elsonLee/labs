@@ -4,6 +4,7 @@ package shardkv
 // import "shardmaster"
 import "labrpc"
 import "raft"
+import "shardmaster"
 import "sync"
 import "labgob"
 import "fmt"
@@ -25,15 +26,28 @@ type Session struct {
 
 type ShardKV struct {
     mu              sync.Mutex
+
     me              int
+
     rf              *raft.Raft
+
     applyCh         chan raft.ApplyMsg
+
     make_end        func(string) *labrpc.ClientEnd
+
     gid             int
+
     masters         []*labrpc.ClientEnd
+
     maxraftstate    int // snapshot if log grows this big
 
     // Your definitions here.
+    configMtx       sync.Mutex
+
+    config          shardmaster.Config
+
+    mck             *shardmaster.Clerk
+
     db              map[string]string
 
     session         Session
@@ -114,6 +128,17 @@ func (kv *ShardKV) GetReplyCh (info Info) (chan chan OpReply, bool) {
 }
 
 func (kv *ShardKV) HandleRequest (request *Op) OpReply {
+
+    key := request.GetKey()
+    shard := key2shard(key)
+    kv.configMtx.Lock()
+    gid := kv.config.Shards[shard]
+    kv.configMtx.Unlock()
+    if gid != kv.gid {
+        kv.Log("gid:%v, gid:%d\n", gid, kv.gid)
+        return OpReply{Type: request.Type,
+                       Err: ErrWrongGroup}
+    }
 
     reqType := request.Type
     info := request.GetInfo()
@@ -233,6 +258,22 @@ func (kv *ShardKV) Kill() {
 	// Your code here, if desired.
 }
 
+func (kv *ShardKV) PollingShardConfig () {
+
+    for {
+        ticker := time.NewTicker(time.Duration(100) * time.Millisecond)
+        select {
+        case <-ticker.C:
+            config := kv.mck.Query(-1)
+            kv.configMtx.Lock()
+            if config.Num != kv.config.Num {
+                kv.config = config
+            }
+            kv.configMtx.Unlock()
+        }
+    }
+}
+
 func (kv *ShardKV) PollingApplyCh () {
 
     for {
@@ -242,8 +283,6 @@ func (kv *ShardKV) PollingApplyCh () {
         case applyMsg := <-kv.applyCh:
 
             if op, valid := applyMsg.Command.(Op); valid {
-
-                kv.Log("apply %v\n", op)
 
                 opReply := kv.ApplyOp(&op)
                 info := op.GetInfo()
@@ -325,12 +364,14 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
     kv.opCh = make(chan Op)
 
     // Use something like this to talk to the shardmaster:
-    // kv.mck = shardmaster.MakeClerk(kv.masters)
+    kv.config = shardmaster.Config{Num:-1}
+    kv.mck = shardmaster.MakeClerk(kv.masters)
 
     kv.applyCh = make(chan raft.ApplyMsg)
     kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
     go kv.PollingApplyCh()
+    go kv.PollingShardConfig()
 
     return kv
 }

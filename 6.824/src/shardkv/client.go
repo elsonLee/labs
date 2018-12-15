@@ -15,7 +15,7 @@ import "shardmaster"
 import "time"
 import "fmt"
 
-const DebugOn = false
+const DebugOn = true
 
 //
 // which shard is a key in?
