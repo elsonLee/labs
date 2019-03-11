@@ -14,7 +14,7 @@ const Debug = true
 
 func (kv *ShardKV) Log (format string, a ...interface{}) (n int, err error) {
     if Debug {
-        fmt.Printf("[server%d] %s", kv.me,
+        fmt.Printf("[server-%d-%d] %s", kv.gid, kv.me,
             fmt.Sprintf(format, a...))
     }
     return
@@ -25,6 +25,7 @@ type Session struct {
 }
 
 type ShardKV struct {
+
     mu              sync.Mutex
 
     me              int
@@ -60,18 +61,23 @@ type ShardKV struct {
 }
 
 
-func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
-    // Your code here.
+func (kv *ShardKV) Get (args *GetArgs, reply *GetReply) {
     opRequest := &Op{Type: ReqGet,
                      ArgsGet: *args}
     opReply := kv.HandleRequest(opRequest)
     reply.Fill(&opReply)
 }
 
-func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-    // Your code here.
+func (kv *ShardKV) PutAppend (args *PutAppendArgs, reply *PutAppendReply) {
     opRequest := &Op{Type: ReqPutAppend,
                      ArgsPutAppend: *args}
+    opReply := kv.HandleRequest(opRequest)
+    reply.Fill(&opReply)
+}
+
+func (kv *ShardKV) MoveShards (args *MoveShardsArgs, reply *MoveShardsReply) {
+    opRequest := &Op{Type: ReqMoveShard,
+                     ArgsMoveShards: *args}
     opReply := kv.HandleRequest(opRequest)
     reply.Fill(&opReply)
 }
@@ -219,9 +225,15 @@ func (kv *ShardKV) ApplyPutAppend (args *PutAppendArgs) OpReply {
     return OpReply{}
 }
 
-func (kv *ShardKV) ApplyOp (op *Op) OpReply {
+func (kv *ShardKV) ApplyMoveShards (args *MoveShardsArgs) OpReply {
+    if args.To == kv.gid {
+        info := args.Info
+        from := args.From
+        shards := args.Shards
+    }
+}
 
-    kv.Log("apply: %v\n", *op)
+func (kv *ShardKV) ApplyOp (op *Op) OpReply {
 
     info := op.GetInfo()
 
@@ -240,9 +252,13 @@ func (kv *ShardKV) ApplyOp (op *Op) OpReply {
         ret = kv.ApplyGet(&op.ArgsGet)
     case ReqPutAppend:
         ret = kv.ApplyPutAppend(&op.ArgsPutAppend)
+    case ReqMoveShard:
+        ret = kv.ApplyMoveShards(&op.ArgsMoveShards)
     default:
         panic(0)
     }
+
+    kv.Log("apply: %v ==> %v\n", *op, ret)
 
     return ret
 }
@@ -288,7 +304,6 @@ func (kv *ShardKV) PollingApplyCh () {
                 info := op.GetInfo()
 
                 replyCh, ok := kv.GetReplyCh(info)
-
                 if ok {
                     ch := <-replyCh
                     Loop:

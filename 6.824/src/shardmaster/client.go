@@ -12,7 +12,6 @@ import "math/big"
 
 type Clerk struct {
     servers     []*labrpc.ClientEnd
-    // Your data here.
     me          int64
     leaderHint  int
 }
@@ -27,7 +26,6 @@ func nrand() int64 {
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
     ck := new(Clerk)
     ck.servers = servers
-    // Your code here.
     ck.me = nrand()
     ck.leaderHint = 0
 
@@ -36,14 +34,13 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 
 func (ck *Clerk) Log (format string, a ...interface{}) {
     if DebugOn {
-        fmt.Printf("[clerk] %s",
+        fmt.Printf("[master:clerk] %s",
                     fmt.Sprintf(format, a...))
     }
 }
 
 func (ck *Clerk) Query(num int) Config {
 
-    // Your code here.
     info := Info{Clerk: ck.me, ID: nrand()}
     args := &QueryArgs{Info: info, Num: num}
 
@@ -62,7 +59,7 @@ func (ck *Clerk) Query(num int) Config {
 }
 
 func (ck *Clerk) Join(servers map[int][]string) {
-    // Your code here.
+
     info := Info{Clerk: ck.me, ID: nrand()}
     args := &JoinArgs{Info: info,
                       Servers: servers}
@@ -81,7 +78,7 @@ func (ck *Clerk) Join(servers map[int][]string) {
 }
 
 func (ck *Clerk) Leave(gids []int) {
-    // Your code here.
+
     info := Info{Clerk: ck.me, ID: nrand()}
     args := &LeaveArgs{Info: info,
                        GIDs: gids}
@@ -100,7 +97,7 @@ func (ck *Clerk) Leave(gids []int) {
 }
 
 func (ck *Clerk) Move(shard int, gid int) {
-    // Your code here.
+
     info := Info{Clerk: ck.me, ID: nrand()}
     args := &MoveArgs{Info: info,
                       Shard: shard,

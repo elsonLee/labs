@@ -8,7 +8,7 @@ import "labgob"
 import "fmt"
 import "time"
 
-const DebugOn bool = false
+const DebugOn bool = true
 
 func (sm *ShardMaster) Log (format string, a ...interface{}) (n int, err error) {
     if DebugOn {
@@ -24,11 +24,13 @@ type Session struct {
 
 type ShardMaster struct {
     mu              sync.Mutex
+
     me              int
+
     rf              *raft.Raft
+
     applyCh         chan raft.ApplyMsg
 
-    // Your data here.
     session         Session
 
     configs         []Config // indexed by config num
@@ -307,6 +309,7 @@ func (sm *ShardMaster) ApplyJoin (args *JoinArgs) OpReply {
     sm.JoinAdjustShards(&config.Shards, gids)
 
     sm.configs = append(sm.configs, config)
+    sm.Log("config: %v\n", config)
 
     return OpReply {Type: ReqJoin,
                     WrongLeader: false,
@@ -363,7 +366,7 @@ func (sm *ShardMaster) ApplyMove (args *MoveArgs) OpReply {
 }
 
 func (sm *ShardMaster) ApplyQuery (args *QueryArgs) OpReply {
-    sm.Log("applyQuery %v\n", args)
+    //sm.Log("applyQuery %v\n", args)
     last := len(sm.configs) - 1
     num := args.Num
 

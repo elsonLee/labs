@@ -108,6 +108,7 @@ func TestJoinLeave(t *testing.T) {
 		check(t, ck, ka[i], va[i])
 	}
 
+	fmt.Printf("Join 1 ...\n")
 	cfg.join(1)
 
 	for i := 0; i < n; i++ {
@@ -117,6 +118,7 @@ func TestJoinLeave(t *testing.T) {
 		va[i] += x
 	}
 
+	fmt.Printf("Leave 0 ...\n")
 	cfg.leave(0)
 
 	for i := 0; i < n; i++ {
@@ -129,9 +131,11 @@ func TestJoinLeave(t *testing.T) {
 	// allow time for shards to transfer.
 	time.Sleep(1 * time.Second)
 
+	fmt.Printf("CheckLog ...\n")
 	cfg.checklogs()
 	cfg.ShutdownGroup(0)
 
+	fmt.Printf("CheckShards ...\n")
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
 	}

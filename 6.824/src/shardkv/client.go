@@ -48,7 +48,7 @@ type Clerk struct {
 
 func (ck *Clerk) Log (format string, a ...interface{}) {
     if DebugOn {
-        fmt.Printf("[clerk] %s",
+        fmt.Printf("[kvclerk] %s",
                     fmt.Sprintf(format, a...))
     }
 }
@@ -66,7 +66,6 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
     ck := new(Clerk)
     ck.sm = shardmaster.MakeClerk(masters)
     ck.make_end = make_end
-    // You'll have to add code here.
     ck.me = nrand()
     return ck
 }
@@ -82,6 +81,9 @@ func (ck *Clerk) Get(key string) string {
     args := GetArgs{Info: info, Key: key}
 
     for {
+		// ask master for the latest configuration.
+		ck.config = ck.sm.Query(-1)
+
         shard := key2shard(key)
         gid := ck.config.Shards[shard]
         if servers, ok := ck.config.Groups[gid]; ok {
@@ -100,7 +102,7 @@ func (ck *Clerk) Get(key string) string {
         }
         time.Sleep(100 * time.Millisecond)
         // ask master for the latest configuration.
-        ck.config = ck.sm.Query(-1)
+        //ck.config = ck.sm.Query(-1)
     }
 
     return ""
@@ -116,6 +118,9 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
                               Value: value, Op: op}
 
 	for {
+		// ask master for the latest configuration.
+		ck.config = ck.sm.Query(-1)
+
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
@@ -133,7 +138,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		}
 		time.Sleep(100 * time.Millisecond)
 		// ask master for the latest configuration.
-		ck.config = ck.sm.Query(-1)
+		//ck.config = ck.sm.Query(-1)
 	}
 }
 

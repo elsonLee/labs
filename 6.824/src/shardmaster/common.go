@@ -1,5 +1,7 @@
 package shardmaster
 
+import "fmt"
+
 //
 // Master shard server: assigns shards to replication groups.
 //
@@ -31,6 +33,10 @@ type Config struct {
     Num         int              // config number
     Shards      [NShards]int     // shard -> gid (group)
     Groups      map[int][]string // gid -> servers[]
+}
+
+func (config Config) String () string {
+    return fmt.Sprintf("id:%d, shards:%v", config.Num, config.Shards)
 }
 
 func (conf *Config) GetUnusedGid () []int {
@@ -73,6 +79,10 @@ type Op struct {
 type Info struct {
     Clerk       int64
     ID          int64
+}
+
+func (info Info) String () string {
+    return fmt.Sprintf("ck:%d, id:%d", info.Clerk, info.ID)
 }
 
 type JoinArgs struct {
@@ -122,6 +132,10 @@ type QueryReply struct {
     WrongLeader bool
     Err         Err
     Config      Config
+}
+
+func (reply QueryReply) String () string {
+    return fmt.Sprintf("isLeader:%v, config:%v", !reply.WrongLeader, reply.Config)
 }
 
 func (op *Op) GetInfo () Info {
