@@ -57,28 +57,24 @@ func (config *Config) Copy () Config {
 }
 
 func (sm *ShardMaster) Join (args *JoinArgs, reply *JoinReply) {
-    // Your code here.
     opRequest := &Op{Type: ReqJoin, ArgsJoin: *args}
     opReply := sm.HandleRequest(opRequest)
     reply.Fill(&opReply)
 }
 
 func (sm *ShardMaster) Leave (args *LeaveArgs, reply *LeaveReply) {
-    // Your code here.
     opRequest := &Op{Type: ReqLeave, ArgsLeave: *args}
     opReply := sm.HandleRequest(opRequest)
     reply.Fill(&opReply)
 }
 
 func (sm *ShardMaster) Move (args *MoveArgs, reply *MoveReply) {
-    // Your code here.
     opRequest := &Op{Type: ReqMove, ArgsMove: *args}
     opReply := sm.HandleRequest(opRequest)
     reply.Fill(&opReply)
 }
 
 func (sm *ShardMaster) Query (args *QueryArgs, reply *QueryReply) {
-    // Your code here.
     opRequest := &Op{Type: ReqQuery, ArgsQuery: *args}
     opReply := sm.HandleRequest(opRequest)
     reply.Fill(&opReply)
@@ -181,43 +177,43 @@ func (sm *ShardMaster) HandleRequest (request *Op) OpReply {
 func (sm *ShardMaster) JoinAdjustShards (shards *[NShards]int, gids []int) {
     //sm.Log("before JoinAdjust: %v\n", shards)
 
-    gid_map := map[int]int{}
+    // gid -> shardCntInGid, record num of shards in group identified with gid
+    shardCntMap := map[int]int{}
     for _, gid := range shards {
         if gid != 0 {
-            if _, ok := gid_map[gid]; ok {
-                gid_map[gid] += 1
-            } else {
-                gid_map[gid] = 1
-            }
+            shardCntMap[gid] += 1
         }
     }
 
     for _, new_gid := range gids {
-        if _, ok := gid_map[new_gid]; !ok {
-            length := len(gid_map) + 1
-            min := NShards/length
-            max := min
-            if NShards%length > 0 {
-                max += 1
-            }
-            if min > 0 {
-                gid_map[new_gid] = 0
+        numGroup := len(shardCntMap) + 1
+        minShardCnt := NShards/numGroup       // min shard count in any group
+        maxShardCnt := minShardCnt            // max shard count in any group
+        if NShards%numGroup > 0 {
+            maxShardCnt += 1
+        }
+        if _, ok := shardCntMap[new_gid]; !ok {   // new_gid shouldn't exist
+            if minShardCnt > 0 {
+                shardCntMap[new_gid] = 0
                 for i, gid := range shards {
-                    if _, ok := gid_map[gid]; ok {
-                        if gid_map[gid] > min {
+                    if _, ok := shardCntMap[gid]; ok {
+                        // move from gid to new_gid
+                        if shardCntMap[gid] > minShardCnt {
                             shards[i] = new_gid
-                            gid_map[gid] -= 1
-                            gid_map[new_gid] += 1
-                            if gid_map[new_gid] >= max {
-                                break
-                            }
+                            shardCntMap[gid] -= 1
+                            shardCntMap[new_gid] += 1
                         }
                     } else {
-                        shards[i] = new_gid
-                        gid_map[new_gid] += 1
-                        if gid_map[new_gid] >= max {
-                            break
+                        // get unassigned shard
+                        if gid != 0 {
+                            panic("gid should be zero here!")
                         }
+                        shards[i] = new_gid
+                        shardCntMap[new_gid] += 1
+                    }
+
+                    if shardCntMap[new_gid] >= maxShardCnt {
+                        break
                     }
                 }
             }
@@ -227,71 +223,75 @@ func (sm *ShardMaster) JoinAdjustShards (shards *[NShards]int, gids []int) {
     //sm.Log("after JoinAdjust: %v\n", shards)
 }
 
-func (sm *ShardMaster) LeaveAdjustShards (shards *[NShards]int, gids []int, unused_gids []int) {
-    //sm.Log("before LeaveAdjust: %v\n", shards)
+func (sm *ShardMaster) LeaveAdjustShards (shards *[NShards]int, leaveGids []int, unusedGids []int) {
 
-    gid_map := map[int]int{}
+    shardCntMap := map[int]int{}
     for _, gid := range shards {
         if gid != 0 {
-            if _, ok := gid_map[gid]; ok {
-                gid_map[gid] += 1
-            } else {
-                gid_map[gid] = 1
-            }
+            shardCntMap[gid] += 1
         }
     }
 
-    for _, rm_gid := range gids {
-        if _, ok := gid_map[rm_gid]; ok {
-            if len(unused_gids) > 0 {
-                new_gid := unused_gids[0]
-                gid_map[new_gid] = 0
+    for _, leaveGid := range leaveGids {
+
+        if _, ok := shardCntMap[leaveGid]; ok {
+            // if have unused gid, just replace gid
+            if len(unusedGids) > 0 {
+                unused := unusedGids[0]
+                shardCntMap[unused] = 0
                 for i, _ := range shards {
-                    if shards[i] == rm_gid {
-                        shards[i] = new_gid
-                        gid_map[new_gid] += 1
+                    if shards[i] == leaveGid {
+                        shards[i] = unused
+                        shardCntMap[unused] += 1
                     }
                 }
-                unused_gids = unused_gids[1:]
+                unusedGids = unusedGids[1:]
             } else {
-                length := len(gid_map) - 1
-                if length > 0 {
-                    min := NShards/length
-                    max := min
-                    if NShards%length > 0 {
-                        max += 1
+                // rebalancing
+                numGroup := len(shardCntMap) - 1
+                if numGroup > 0 {
+                    minShardCnt := NShards/numGroup
+                    maxShardCnt := minShardCnt
+                    if NShards%numGroup > 0 {
+                        maxShardCnt += 1
                     }
 
-                    var gid_to_add []int
-                    for used_gid, cnt := range gid_map {
-                        if used_gid != rm_gid {
-                            for i := 0; i < max - cnt; i++ {
-                                gid_to_add = append(gid_to_add, used_gid)
+                    var gidsExpand []int
+                    for activeGid, shardCnt := range shardCntMap {
+                        if activeGid != leaveGid {
+                            for i := 0; i < maxShardCnt - shardCnt; i++ {
+                                gidsExpand = append(gidsExpand, activeGid)
                             }
                         }
                     }
 
-                    for i, tgid := range shards {
-                        if tgid == rm_gid {
-                            gid_added := gid_to_add[0]
-                            shards[i] = gid_added
-                            gid_to_add = gid_to_add[1:]
-                            gid_map[gid_added] += 1
+                    // replace leaveGid
+                    for i, gid := range shards {
+                        if gid == leaveGid {
+                            if len(gidsExpand) > 0 {
+                                top := gidsExpand[0]
+                                shards[i] = top
+                                gidsExpand = gidsExpand[1:]
+                                shardCntMap[top] += 1
+                            } else {
+                                panic("shouldn't have empty gidsExpand!")
+                            }
                         }
                     }
                 } else {
+                    // reset
                     for i := 0; i < NShards; i++ {
                         shards[i] = 0
                     }
                 }
             }
-            delete(gid_map, rm_gid)
+            delete(shardCntMap, leaveGid)
         }
     }
 
-    //sm.Log("after LeaveAdjust: %v\n", shards)
 }
 
+// add new replica groups, every gid -> []string
 func (sm *ShardMaster) ApplyJoin (args *JoinArgs) OpReply {
     sm.Log("applyJoin %v\n", args)
     last := len(sm.configs) - 1
@@ -299,8 +299,8 @@ func (sm *ShardMaster) ApplyJoin (args *JoinArgs) OpReply {
     config.Num += 1
 
     var gids []int
-    for gid, server := range args.Servers {
-        config.Groups[gid] = server
+    for gid, servers := range args.Servers {
+        config.Groups[gid] = servers
         gids = append(gids, gid)
     }
 
@@ -319,15 +319,16 @@ func (sm *ShardMaster) ApplyLeave (args *LeaveArgs) OpReply {
     config := sm.configs[last].Copy()
     config.Num += 1
 
-    unused_gids := config.GetUnusedGid()
-    leave_map := map[int]bool{}
+    unusedGids := config.GetUnusedGid()
+    leaveGids := map[int]bool{}
     for _, gid := range args.GIDs {
-        leave_map[gid] = true
+        leaveGids[gid] = true
     }
-    for i := 0; i < len(unused_gids); {
-        gid := unused_gids[i]
-        if _, ok := leave_map[gid]; ok {
-            unused_gids = append(unused_gids[:i], unused_gids[i+1:]...)
+    // remove gids if group is in leaveGids
+    for i := 0; i < len(unusedGids); {
+        gid := unusedGids[i]
+        if _, ok := leaveGids[gid]; ok {
+            unusedGids = append(unusedGids[:i], unusedGids[i+1:]...)
         } else {
             i++
         }
@@ -339,7 +340,7 @@ func (sm *ShardMaster) ApplyLeave (args *LeaveArgs) OpReply {
         gids = append(gids, gid)
     }
 
-    sm.LeaveAdjustShards(&config.Shards, gids, unused_gids)
+    sm.LeaveAdjustShards(&config.Shards, gids, unusedGids)
 
     sm.configs = append(sm.configs, config)
     return OpReply {Type: ReqLeave,
@@ -440,7 +441,6 @@ func (sm *ShardMaster) PollingApplyCh () {
                 info := op.GetInfo()
 
                 replyCh, ok := sm.GetReplyCh(info)
-
                 if ok {
                     ch := <-replyCh
                     Loop:

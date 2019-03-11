@@ -20,26 +20,31 @@ package shardmaster
 // The number of shards.
 const NShards = 10
 
+type GroupInfo struct {
+    Gid		    int
+    Shards      []int
+}
+
 // A configuration -- an assignment of shards to groups.
 // Please don't change this.
 type Config struct {
     Num         int              // config number
-    Shards      [NShards]int     // shard -> gid
+    Shards      [NShards]int     // shard -> gid (group)
     Groups      map[int][]string // gid -> servers[]
 }
 
 func (conf *Config) GetUnusedGid () []int {
-    used_map := map[int]bool{}
+    gidSet := map[int]bool{}
     for _, gid := range conf.Shards {
-        used_map[gid] = true
+        gidSet[gid] = true
     }
-    unused_gids := []int{}
+    unusedGids := []int{}
     for gid, _ := range conf.Groups {
-        if _, ok := used_map[gid]; !ok {
-            unused_gids = append(unused_gids, gid)
+        if _, ok := gidSet[gid]; !ok {
+            unusedGids = append(unusedGids, gid)
         }
     }
-    return unused_gids
+    return unusedGids
 }
 
 const (
