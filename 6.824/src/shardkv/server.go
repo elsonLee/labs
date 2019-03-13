@@ -1,20 +1,24 @@
 package shardkv
 
-
-// import "shardmaster"
-import "labrpc"
-import "raft"
-import "shardmaster"
-import "sync"
-import "labgob"
-import "fmt"
-import "time"
+import (
+    "fmt"
+    "labgob"
+    "labrpc"
+    "raft"
+    "shardmaster"
+    "sync"
+    "time"
+)
 
 const Debug = true
 
 func (kv *ShardKV) Log (format string, a ...interface{}) (n int, err error) {
+    kv.configMtx.Lock()
+    curConfig := kv.config
+    kv.configMtx.Unlock()
     if Debug {
-        fmt.Printf("[server-%d-%d] %s", kv.gid, kv.me,
+        fmt.Printf("[server-%d-%d:cfg-%d:%v] %s",
+            kv.gid, kv.me, curConfig.Num, kv.shardToRecv,
             fmt.Sprintf(format, a...))
     }
     return
@@ -22,6 +26,56 @@ func (kv *ShardKV) Log (format string, a ...interface{}) (n int, err error) {
 
 type Session struct {
     LastApplied     map[int64]int64
+}
+
+type ShardToRecv struct {
+    Gid             int
+    ConfigNum       int // FIXME
+    Unfinished      map[int]int    // shardId -> from_gid
+}
+
+func (sr ShardToRecv) String () string {
+    recv := []int{}
+    for shardId, _ := range sr.Unfinished {
+        recv = append(recv, shardId)
+    }
+    return fmt.Sprintf("toRecv%v", recv)
+}
+
+func (sr *ShardToRecv) Empty () bool {
+    return len(sr.Unfinished) == 0
+}
+
+func (sr *ShardToRecv) Update (oldConfig, newConfig *shardmaster.Config) bool {
+    if !sr.Empty() {
+        return false
+    }
+    oldShards := oldConfig.Shards
+    newShards := newConfig.Shards
+    for id, tgid := range newShards {
+        if tgid == sr.Gid && oldShards[id] != 0 && oldShards[id] != sr.Gid {
+            sr.Unfinished[id] = tgid
+        }
+    }
+    sr.ConfigNum = newConfig.Num
+    return true
+}
+
+func (sr *ShardToRecv) IsReceived (shardId int) bool {
+    if _, ok := sr.Unfinished[shardId]; ok {
+        return false
+    } else {
+        return true
+    }
+}
+
+func (sr *ShardToRecv) Remove (shardId int) bool {
+    if _, ok := sr.Unfinished[shardId]; ok {
+        delete(sr.Unfinished, shardId)
+        return true
+    } else {
+        return false
+    }
 }
 
 type ShardKV struct {
@@ -46,6 +100,8 @@ type ShardKV struct {
     configMtx       sync.Mutex
 
     config          shardmaster.Config
+
+    shardToRecv     ShardToRecv       // record shards to be accepted
 
     mck             *shardmaster.Clerk
 
@@ -135,19 +191,23 @@ func (kv *ShardKV) GetReplyCh (info Info) (chan chan OpReply, bool) {
 
 func (kv *ShardKV) HandleRequest (request *Op) OpReply {
 
-    key := request.GetKey()
-    shard := key2shard(key)
-    kv.configMtx.Lock()
-    gid := kv.config.Shards[shard]
-    kv.configMtx.Unlock()
-    if gid != kv.gid {
-        kv.Log("gid:%v, gid:%d\n", gid, kv.gid)
-        return OpReply{Type: request.Type,
-                       Err: ErrWrongGroup}
-    }
+    // optimize for get/put/append
+    //key := request.GetKey()
+    //shard := key2shard(key)
+    //kv.configMtx.Lock()
+    //gid := kv.config.Shards[shard]
+    //kv.configMtx.Unlock()
+    //if gid != kv.gid {
+    //    kv.Log("gid:%v, gid:%d\n", gid, kv.gid)
+    //    return OpReply{Type: request.Type,
+    //                   Err: ErrWrongGroup}
+    //}
 
     reqType := request.Type
-    info := request.GetInfo()
+    info, err := request.GetInfo()
+    if err != nil {
+        panic("should have no err")
+    }
 
     replyCh := make(chan chan OpReply, 1)
     kv.RegisterReplyCh(info, replyCh)
@@ -187,7 +247,34 @@ func (kv *ShardKV) HandleRequest (request *Op) OpReply {
     return OpReply{}
 }
 
+func (kv *ShardKV) CheckWrongGroup (key string) bool {
+    shardId := key2shard(key)
+
+    kv.configMtx.Lock()
+    curConfig := kv.config
+    kv.configMtx.Unlock()
+
+    // curConfig is not support shardId
+    if curConfig.Shards[shardId] != kv.gid {
+       return true
+    } else {
+        // not recv shards yet
+        kv.configMtx.Lock()
+        defer kv.configMtx.Unlock()
+        if kv.shardToRecv.IsReceived(shardId) == false {
+            return true
+        } else {
+            return false
+        }
+    }
+}
+
 func (kv *ShardKV) ApplyGet (args *GetArgs) OpReply {
+    if kv.CheckWrongGroup(args.Key) {
+        return OpReply{Type: ReqGet,
+                       Err: ErrWrongGroup}
+    }
+
     if v, ok := kv.db[args.Key]; ok {
         return OpReply{Type: ReqGet,
                        WrongLeader: false,
@@ -203,6 +290,12 @@ func (kv *ShardKV) ApplyGet (args *GetArgs) OpReply {
 func (kv *ShardKV) ApplyPutAppend (args *PutAppendArgs) OpReply {
     key := args.Key
     value := args.Value
+
+    if kv.CheckWrongGroup(args.Key) {
+        return OpReply{ Type: ReqPutAppend,
+                        Err: ErrWrongGroup}
+    }
+
     if args.Op == "Put" {
         kv.db[key] = value
         return OpReply{Type: ReqPutAppend,
@@ -225,23 +318,144 @@ func (kv *ShardKV) ApplyPutAppend (args *PutAppendArgs) OpReply {
     return OpReply{}
 }
 
-func (kv *ShardKV) ApplyMoveShards (args *MoveShardsArgs) OpReply {
-    if args.To == kv.gid {
-        info := args.Info
-        from := args.From
-        shards := args.Shards
+// append shard to out map
+func (kv *ShardKV) GetShard (shardId int) Shard {
+    // need't lock kv.db
+    out := map[string]string{}
+    for key, value := range kv.db {     // TODO: optimize
+        if key2shard(key) == shardId {
+            if _, ok := out[key]; !ok {
+                out[key] = value
+            } else {
+                panic("shouldn't exist key")
+            }
+        }
     }
+    return Shard{shardId, out}
+}
+
+func (kv *ShardKV) SendShards (curConfig, newConfig shardmaster.Config) {
+    curShards := curConfig.Shards
+    newShards := newConfig.Shards
+
+    // to_gid -> shards
+    shardMap := map[int][]Shard{}
+    for id, gid := range curShards {
+        to := newShards[id]
+        if gid == kv.gid && to != gid && to != 0 {
+            shardMap[to] = append(shardMap[to], kv.GetShard(id))
+        }
+    }
+
+    for gid, shards := range shardMap {
+
+        go func (to int, _shards []Shard, config shardmaster.Config) {
+
+            info := Info{Clerk: nrand(), ID: nrand()}   // FIXME: use unique id
+            args := MoveShardsArgs{Info: info, From: kv.gid, To: to, ConfigNum: config.Num ,Shards: _shards}
+            serverNames := config.Groups[to]
+
+            count := 20
+            i := 0
+            numServerName := len(serverNames)
+            for {
+                name := serverNames[i]
+                srv := kv.make_end(name)
+                var reply MoveShardsReply
+                ok := srv.Call("ShardKV.MoveShards", &args, &reply)
+                if ok && reply.WrongLeader == false {
+                    if reply.Err == OK {
+                        return
+                    } else if reply.Err == ErrRetryConfig {
+                        // keep i unchanged
+                        time.Sleep(100 * time.Millisecond)
+                    } else {
+                        i = (i+1)%numServerName
+                    }
+                } else {
+                    i = (i+1)%numServerName
+                }
+                count -= 1
+                if count < 0 {
+                    panic("shard cannot be sent")
+                }
+            }
+
+        } (gid, shards, newConfig)
+
+    }
+}
+
+func (kv *ShardKV) ApplyCfgChange (args *CfgChangeArgs) OpReply {
+    //kv.Log("recv %v\n", *args)
+    curConfig := kv.config
+    newConfig := args.Config
+
+    kv.configMtx.Lock()
+    if newConfig.Num == kv.config.Num+1 {
+        kv.shardToRecv.Update(&curConfig, &newConfig)
+        kv.config = newConfig
+    }
+    kv.configMtx.Unlock()
+
+    if _, isLeader := kv.rf.GetState(); isLeader {
+        kv.SendShards(curConfig, newConfig)
+    }
+
+    return OpReply{Type: ReqCfgChange,
+                   Err: OK}
+}
+
+func (kv *ShardKV) ApplyMoveShards (args *MoveShardsArgs) OpReply {
+    //kv.Log("recv %v\n", *args)
+    kv.configMtx.Lock()
+    curConfig := kv.config
+    kv.configMtx.Unlock()
+
+    if args.ConfigNum > curConfig.Num {
+        return OpReply{ Type: ReqMoveShard,
+                        Err: ErrRetryConfig}
+    }
+
+    if args.To == kv.gid {
+       //info := args.Info
+       //from := args.From
+       shards := args.Shards
+
+       // TODO: detect duplication
+       for _, shard := range shards {
+
+           // add to db
+           id := shard.Id
+           db := shard.Data
+           for key, value := range db {
+               kv.db[key] = value
+           }
+
+           // remove from shardToRecv
+           kv.configMtx.Lock()
+           kv.shardToRecv.Remove(id)
+           kv.configMtx.Unlock()
+       }
+    } else {
+        panic("recv wrong move cmd!")
+    }
+
+    return OpReply{ Type: ReqMoveShard,
+                    WrongLeader: false,
+                    Err: OK}
 }
 
 func (kv *ShardKV) ApplyOp (op *Op) OpReply {
 
-    info := op.GetInfo()
-
-    if op.Type != ReqGet {
-        if kv.session.LastApplied[info.Clerk] == info.ID {
-            kv.Log("skip duplicated operation: %v\n", *op)
-            return OpReply{Type: op.Type,
-                           Err: OK}
+    info, err := op.GetInfo()
+    if err == nil {
+        if op.Type != ReqGet {
+            if kv.session.LastApplied[info.Clerk] == info.ID {
+                kv.Log("skip duplicated operation: %v\n", *op)
+                return OpReply{Type: op.Type,
+                    Err: OK}
+            }
         }
     }
 
@@ -252,6 +466,8 @@ func (kv *ShardKV) ApplyOp (op *Op) OpReply {
         ret = kv.ApplyGet(&op.ArgsGet)
     case ReqPutAppend:
         ret = kv.ApplyPutAppend(&op.ArgsPutAppend)
+    case ReqCfgChange:
+        ret = kv.ApplyCfgChange(&op.ArgsCfgChange)
     case ReqMoveShard:
         ret = kv.ApplyMoveShards(&op.ArgsMoveShards)
     default:
@@ -274,18 +490,29 @@ func (kv *ShardKV) Kill() {
 	// Your code here, if desired.
 }
 
-func (kv *ShardKV) PollingShardConfig () {
+// if shards are not received completely, dont update new config
+func (kv *ShardKV) TryUpdateConfig () {
 
+    kv.configMtx.Lock()
+    curConfig := kv.config
+    kv.configMtx.Unlock()
+
+    newConfig := kv.mck.Query(curConfig.Num+1)
+    //kv.Log("find new config: %v\n", newConfig)
+    if newConfig.Num == curConfig.Num+1 {
+        if _, isLeader := kv.rf.GetState(); isLeader {
+            request := CfgChangeArgs{newConfig}
+            kv.rf.Start(Op{Type:ReqCfgChange, ArgsCfgChange:request})
+        }
+    }
+}
+
+func (kv *ShardKV) PollingShardConfig () {
     for {
         ticker := time.NewTicker(time.Duration(100) * time.Millisecond)
         select {
         case <-ticker.C:
-            config := kv.mck.Query(-1)
-            kv.configMtx.Lock()
-            if config.Num != kv.config.Num {
-                kv.config = config
-            }
-            kv.configMtx.Unlock()
+            kv.TryUpdateConfig()
         }
     }
 }
@@ -301,25 +528,26 @@ func (kv *ShardKV) PollingApplyCh () {
             if op, valid := applyMsg.Command.(Op); valid {
 
                 opReply := kv.ApplyOp(&op)
-                info := op.GetInfo()
-
-                replyCh, ok := kv.GetReplyCh(info)
-                if ok {
-                    ch := <-replyCh
+                info, err := op.GetInfo()
+                if err == nil {
+                    replyCh, ok := kv.GetReplyCh(info)
+                    if ok {
+                        ch := <-replyCh
                     Loop:
-                    for {
-                        ticker := time.NewTicker(time.Duration(1) * time.Second)
-                        select {
-                        case ch <- opReply:
-                            break Loop
-                        case <-ticker.C:
-                            kv.Log("stuck in apply loop on info:%v\n", info)
+                        for {
+                            ticker := time.NewTicker(time.Duration(1) * time.Second)
+                            select {
+                            case ch <- opReply:
+                                break Loop
+                            case <-ticker.C:
+                                kv.Log("stuck in apply loop on info:%v\n", info)
+                            }
                         }
                     }
-                }
 
-                if op.Type != ReqGet {
-                    kv.session.LastApplied[info.Clerk] = info.ID
+                    if opReply.Err == OK && op.Type != ReqGet {
+                        kv.session.LastApplied[info.Clerk] = info.ID
+                    }
                 }
 
             } else {
@@ -376,6 +604,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
     kv.db = make(map[string]string)
     kv.session = Session{LastApplied: make(map[int64]int64)}
     kv.replyMap = make(map[Info]chan chan OpReply)
+    kv.shardToRecv = ShardToRecv{Gid: kv.gid, ConfigNum:-1, Unfinished:make(map[int]int)}
     kv.opCh = make(chan Op)
 
     // Use something like this to talk to the shardmaster:

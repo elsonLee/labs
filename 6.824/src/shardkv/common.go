@@ -1,7 +1,9 @@
 package shardkv
 
 import (
+    "errors"
     "fmt"
+    "shardmaster"
 )
 
 //
@@ -17,6 +19,7 @@ const (
     OK            = "OK"
     ErrNoKey      = "ErrNoKey"
     ErrWrongGroup = "ErrWrongGroup"
+    ErrRetryConfig = "ErrRetryConfig"
 )
 
 type Err string
@@ -25,13 +28,15 @@ type ReqType string
 const (
     ReqGet          ReqType = "get"
     ReqPutAppend    ReqType = "put_append"
-    ReqMoveShard    ReqType = "move_shards"
+    ReqCfgChange    ReqType = "cfg_change"
+    ReqMoveShard    ReqType = "mv_shards"
 )
 
 type Op struct {
     Type            ReqType
     ArgsGet         GetArgs
     ArgsPutAppend   PutAppendArgs
+    ArgsCfgChange   CfgChangeArgs
     ArgsMoveShards  MoveShardsArgs
 }
 
@@ -41,6 +46,8 @@ func (op Op) String () string {
         return op.ArgsGet.String()
     case ReqPutAppend:
         return op.ArgsPutAppend.String()
+    case ReqCfgChange:
+        return op.ArgsCfgChange.String()
     case ReqMoveShard:
         return op.ArgsMoveShards.String()
     default:
@@ -82,7 +89,8 @@ type PutAppendArgs struct {
 }
 
 func (arg PutAppendArgs) String () string {
-    return fmt.Sprintf("[%s] key:%s, val:%s, info:%v", arg.Op, arg.Key, arg.Value, arg.Info)
+    return fmt.Sprintf("[%s] key:%s[shd-%d], val:%s, info:%v",
+        arg.Op, arg.Key, key2shard(arg.Key), arg.Value, arg.Info)
 }
 
 type GetArgs struct {
@@ -92,18 +100,34 @@ type GetArgs struct {
 }
 
 func (arg GetArgs) String () string {
-    return fmt.Sprintf("[Get] key:%s, info:%v", arg.Key, arg.Info)
+    return fmt.Sprintf("[Get] key:%s[shd-%d], info:%v",
+        arg.Key, key2shard(arg.Key), arg.Info)
+}
+
+type CfgChangeArgs struct {
+    Config      shardmaster.Config
+}
+
+func (arg CfgChangeArgs) String () string {
+    return fmt.Sprintf("[CfgChange] %v", arg.Config)
+}
+
+type Shard struct {
+    Id          int
+    Data        map[string]string
 }
 
 type MoveShardsArgs struct  {
     Info        Info
     From        int     // gid
     To          int     // gid
-    Shards      map[string]string
+    ConfigNum   int
+    Shards      []Shard
 }
 
 func (arg MoveShardsArgs) String () string {
-    return fmt.Sprintf("[Move] from:%d, to:%d, shards:%v", arg.From, arg.To, arg.Shards)
+    return fmt.Sprintf("[Move] from:%d, to:%d, cfg:%d, shards:%v",
+        arg.From, arg.To, arg.ConfigNum, arg.Shards)
 }
 
 type PutAppendReply struct {
@@ -129,20 +153,21 @@ func (op *Op) GetKey () string {
     case ReqPutAppend:
         return op.ArgsPutAppend.Key
     default:
-        panic(0)
+        panic("no support key")
         return ""
     }
 }
 
-func (op *Op) GetInfo () Info {
+func (op *Op) GetInfo () (Info, error) {
     switch op.Type {
     case ReqGet:
-        return op.ArgsGet.Info
+        return op.ArgsGet.Info, nil
     case ReqPutAppend:
-        return op.ArgsPutAppend.Info
+        return op.ArgsPutAppend.Info, nil
+    case ReqMoveShard:
+        return op.ArgsMoveShards.Info, nil
     default:
-        panic(0)
-        return Info{}
+        return Info{}, errors.New("no info")
     }
 }
 
