@@ -1,6 +1,7 @@
 package shardkv
 
 import (
+    "bytes"
     "fmt"
     "labgob"
     "labrpc"
@@ -99,15 +100,15 @@ type ShardKV struct {
     // Your definitions here.
     configMtx       sync.Mutex
 
-    config          shardmaster.Config
+    config          shardmaster.Config  // persistent
 
-    shardToRecv     ShardToRecv       // record shards to be accepted
+    shardToRecv     ShardToRecv         // persistent, record shards to be accepted
 
     mck             *shardmaster.Clerk
 
-    db              map[string]string
+    db              map[string]string   // persistent
 
-    session         Session
+    session         Session             // persistent
 
     replyMapMtx     sync.Mutex
 
@@ -498,11 +499,17 @@ func (kv *ShardKV) TryUpdateConfig () {
     kv.configMtx.Unlock()
 
     newConfig := kv.mck.Query(curConfig.Num+1)
-    //kv.Log("find new config: %v\n", newConfig)
     if newConfig.Num == curConfig.Num+1 {
         if _, isLeader := kv.rf.GetState(); isLeader {
-            request := CfgChangeArgs{newConfig}
-            kv.rf.Start(Op{Type:ReqCfgChange, ArgsCfgChange:request})
+            recvFinished := false
+            kv.configMtx.Lock()
+            recvFinished = kv.shardToRecv.Empty() == true
+            kv.configMtx.Unlock()
+
+            if recvFinished {
+                request := CfgChangeArgs{newConfig}
+                kv.rf.Start(Op{Type: ReqCfgChange, ArgsCfgChange: request})
+            }
         }
     }
 }
@@ -557,6 +564,45 @@ func (kv *ShardKV) PollingApplyCh () {
         case <-ticker.C:
             //kv.Log("No request timeout!\n")
         }
+    }
+}
+
+func (kv *ShardKV) SaveSnapshot (lastIndex int) {
+    w := new(bytes.Buffer)
+    e := labgob.NewEncoder(w)
+
+    e.Encode(kv.config)
+    e.Encode(kv.shardToRecv)
+    e.Encode(kv.db)
+    e.Encode(kv.session)
+
+    data := w.Bytes()
+
+    kv.Log("savesnapshot:%d, size:%d\n",
+        lastIndex, len(data))
+
+    kv.rf.SaveSnapshot(data, lastIndex)
+}
+
+func (kv *ShardKV) ParseSnapshot (data []byte) {
+
+    if data == nil || len(data) < 1 {
+        kv.Log("ParseSnapshot nothing!\n")
+        return
+    }
+
+    r := bytes.NewBuffer(data)
+    d := labgob.NewDecoder(r)
+
+    d.Decode(&kv.session)
+    d.Decode(&kv.db)
+    d.Decode(&kv.shardToRecv)
+    d.Decode(&kv.config)
+}
+
+func (kv *ShardKV) LoadSnapshot () {
+    if ok, data := kv.rf.LoadSnapshot(); ok {
+        kv.ParseSnapshot(data)
     }
 }
 
